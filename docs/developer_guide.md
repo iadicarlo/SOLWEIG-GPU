@@ -11,31 +11,35 @@ This guide is intended for developers who want to understand the architecture of
 
 SOLWEIG-GPU is a modular package that separates the different stages of the thermal comfort modeling process. The main components are:
 
+-   **Input Data Builder** (`create_inputs.py`, new in v2): Downloads and builds the required input rasters and meteorological data from near-globally available datasets via `build_inputs()`.
+-   **Wind Extension Coefficients** (`wind_ext_coeff.py`, new in v2): Computes direction-based wind-extension coefficient rasters (GLIDE-SOL scheme) via `build_wind_ext_coeff()`.
 -   **Data Preprocessing**: Handles the validation, tiling, and extraction of input data.
 -   **Geometry Processing**: Calculates wall heights and aspects from the input rasters.
--   **Core SOLWEIG Model**: The main radiation and thermal comfort calculation engine, accelerated with PyTorch.
+-   **Core SOLWEIG Model**: The main radiation and thermal comfort calculation engine (including UTCI and WBGT), accelerated with PyTorch.
 -   **Interfaces**: Provides both a command-line interface (CLI) and a graphical user interface (GUI) for user interaction.
 
 ## Pipeline Stages
 
-The workflow is implemented as three callable stages in `solweig_gpu.solweig_gpu`:
+The workflow is implemented as four callable stages in `solweig_gpu.solweig_gpu`:
 
-1. **`preprocess(...)`** – Validates rasters, creates tiles, and prepares metfiles (from your met file or ERA5/WRF). Writes to `{base_path}/processed_inputs/` (or a custom `preprocess_dir`). Returns the path to the preprocessing directory.
+1. **`preprocess(...)`** – Validates rasters, creates tiles (including optional wind coefficient tiles via `windcoeff_folder`), and prepares metfiles (from your met file or ERA5/WRF; with `use_uhi=True` the ERA5 path also writes the diagnostic UHII). Writes to `{base_path}/processed_inputs/` (or a custom `preprocess_dir`). Returns the path to the preprocessing directory.
 
 2. **`run_walls_aspect(preprocess_dir)`** – Computes wall heights and aspects for all tiles. Writes to `{preprocess_dir}/walls/` and `{preprocess_dir}/aspect/`. Call this after `preprocess()`.
 
-3. **`run_utci_tiles(base_path, preprocess_dir, selected_date_str, ...)`** – Runs the SOLWEIG/UTCI computation per tile and writes GeoTIFFs to `{base_path}/output_folder/{tile_key}/`. Optional argument `tile_keys` lets you run only specific tiles (e.g. `["0_0", "1000_0"]`). Call this after `preprocess()` and `run_walls_aspect()`.
+3. **`calculate_svf(base_path, patch_option=2, overwrite=False)`** – Computes standalone Sky View Factor outputs for all tiles in the preprocessing directory. Writes to `{preprocess_dir}/SVF/`. Existing outputs are skipped unless `overwrite=True`.
 
-The high-level **`thermal_comfort(...)`** function simply calls these three stages in order. You can use `thermal_comfort()` for one-shot runs (same behavior as before), or call the three functions separately when you need to:
+4. **`run_utci_tiles(base_path, preprocess_dir, selected_date_str, ...)`** – Runs the SOLWEIG/UTCI (and optional WBGT) computation per tile and writes GeoTIFFs to `{base_path}/output_folder/{tile_key}/`. Optional argument `tile_keys` lets you run only specific tiles (e.g. `["0_0", "1000_0"]`). Call this after the previous stages.
+
+The high-level **`thermal_comfort(...)`** function calls these stages in order (optionally preceded by `build_wind_ext_coeff()` when `ERA_5_z0_find=True`). You can use `thermal_comfort()` for one-shot runs, or call the stage functions separately when you need to:
 
 - Run preprocessing once and then run UTCI for a subset of tiles.
 - Reuse the same preprocessed tiles with different parameters.
 
-See the [API Reference](api_reference.md) for full parameter lists and the repository’s [REFACTORING.md](../REFACTORING.md) for detailed examples of calling stages separately.
+See the [API Reference](api_reference.md) for full parameter lists and examples of calling stages separately.
 
 ## Module Interactions
 
-The `solweig_gpu.py` module provides the public entry points (`thermal_comfort`, `preprocess`, `run_walls_aspect`, `run_utci_tiles`) and orchestrates the pipeline. The `utci_process.py` module is the core of the computation, bringing together the various components to calculate the final UTCI values.
+The `solweig_gpu.py` module provides the public entry points (`thermal_comfort`, `preprocess`, `build_inputs`, `build_wind_ext_coeff`, `run_walls_aspect`, `calculate_svf`, `run_utci_tiles`) and orchestrates the pipeline. The `utci_process.py` module is the core of the computation, bringing together the various components to calculate the final UTCI (and WBGT, via `calculate_wbgt.py`) values.
 
 ## Contributing to SOLWEIG-GPU
 

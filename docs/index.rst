@@ -1,5 +1,5 @@
 SOLWEIG-GPU: GPU-Accelerated Thermal Comfort Modeling Framework for Urban Digital Twins
-=========================
+=======================================================================================
 
 .. image:: https://readthedocs.org/projects/solweig-gpu/badge/?version=latest
     :target: https://solweig-gpu.readthedocs.io/en/latest/?badge=latest
@@ -18,8 +18,8 @@ SOLWEIG-GPU: GPU-Accelerated Thermal Comfort Modeling Framework for Urban Digita
     :alt: GitHub stars
 
 
-**SOLWEIG-GPU** is a high-performance implementation of the Solar and Longwave Environmental Irradiance Geometry (SOLWEIG) model, 
-designed for calculating Sky View Factor (SVF), mean radiant temperature (Tmrt), Universal Thermal Climate Index (UTCI), shadows, and short and long-wave radiation in urban environments. 
+**SOLWEIG-GPU** is a high-performance implementation of the Solar and Longwave Environmental Irradiance Geometry (SOLWEIG) model,
+designed for calculating Sky View Factor (SVF), mean radiant temperature (Tmrt), Universal Thermal Climate Index (UTCI), Wet Bulb Globe Temperature (WBGT), shadows, and short and long-wave radiation in urban environments.
 
 The original `SOLWEIG model <https://umep-docs.readthedocs.io/en/latest/OtherManuals/SOLWEIG.html>`_ was developed to calculate TMRT over small geographical areas in cities. At this spatial scale, given the time required for computation, the model can be run on CPUs. However, for city-scale thermal comfort estimation, the model should be accelerated using a GPU. Specifically, the calculation of the SVF (the most time-consuming step), TMRT, and UTCI can be processed on a GPU. 
 
@@ -34,6 +34,27 @@ Features
 * **Complete 3D Geometry**: Accounts for buildings, vegetation, and terrain
 * **Parallel Processing**: Multi-core CPU processing for wall calculations
 * **High Accuracy**: Implements SOLWEIG 2022a (will upgrade to 2025a) algorithms with anisotropic radiation
+
+What is new in Version 2
+------------------------
+
+* Modular pipeline: separate functions for wall/aspect (``run_walls_aspect``), sky view factor (``calculate_svf``), and Tmrt/UTCI (``run_utci_tiles``)
+* Wet Bulb Globe Temperature (WBGT) output (``save_wbgt=True``)
+* Bug fixes
+* GLIDE-SOL (Zonato et al., 2026) features:
+
+  * ``build_inputs``: download and process the required input datasets from near-globally available sources (Google Earth Engine)
+  * ``build_wind_ext_coeff``: wind-direction-based wind-extension coefficient calculation (requires ERA5 forecast surface roughness)
+  * Diagnostic urban heat island intensity (UHII) when ERA5 forcing is used (``use_uhi=True``)
+
+Citing SOLWEIG-GPU
+------------------
+
+If you use SOLWEIG-GPU in your research, please cite:
+
+1. Kamath, H. G., Sudharsan, N., Singh, M., Wallenberg, N., Lindberg, F., & Niyogi, D. (2026). SOLWEIG-GPU: GPU-Accelerated Thermal Comfort Modeling Framework for Urban Digital Twins. *Journal of Open Source Software*, 11(118), 9535. https://doi.org/10.21105/joss.09535
+
+2. Zonato, A., Kamath, H. G., Sudharsan, N., Monaco, L., Kittner, J., Wolf, L., Demuzere, M. A., Middel, A., Bechtel, B., & Milelli, M. (2026). GLIDE-SOL: A GPU-accelerated Global Lightweight Infrastructure for Diagnostic Environmental Modeling with SOLWEIG. *EGUsphere*, 2026, 1-30. https://doi.org/10.5194/egusphere-2026-776
 
 Quick Start
 -----------
@@ -92,6 +113,7 @@ Documentation
    :maxdepth: 2
    :caption: API Reference:
 
+   api_reference
    api
 
 .. toctree::

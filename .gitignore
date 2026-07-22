@@ -8,3 +8,9 @@ NOTEBOOKS_SETUP.md
 
 # create_inputs test output (keep locally for analysis)
 austin_create_inputs/
+
+# Sphinx build output (do not commit built docs)
+docs/_build/
+
+# Files staged for deletion (review and delete this folder manually)
+_to_delete/

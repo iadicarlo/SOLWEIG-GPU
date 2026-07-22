@@ -54,7 +54,7 @@ def preprocess(
         building_dsm_filename, dem_filename, trees_filename, landcover_filename:
             Raster paths or filenames. Relative paths are resolved against base_path.
 
-        windcoeff_filename:
+        windcoeff_folder:
             Wind coefficient input. Can be:
               - None: do not use wind coefficients
               - folder path containing WindCoeff_dir*.tif
@@ -161,7 +161,6 @@ def build_inputs(
         city: Name for the output folder. If None, derived from reverse geocoding.
         km_buffer: Half-size of initial bounding box in km.
         km_reduced_lat, km_reduced_lon: Shrink (N/S and E/W) from bbox for SOLWEIG in km.
-        year_start, year_end: Start/end year for meteorology (inclusive).
         base_folder: Workspace root. Defaults to the create_inputs module default.
         resolution: Reference grid resolution in meters.
 
@@ -276,6 +275,18 @@ def calculate_svf(base_path: str, patch_option: int = 2, overwrite: bool = False
     """
     Calculate standalone Sky View Factor outputs for all raster tiles in a
     preprocessing directory.
+
+    Call this after :func:`preprocess`. Writes ``SkyViewFactor_{tile_key}.tif``,
+    ``svfs_{tile_key}.zip`` and ``shadowmats_{tile_key}.npz`` to
+    ``{base_path}/SVF``.
+
+    Args:
+        base_path: Directory containing the tiled ``Building_DSM/``, ``DEM/``
+            and ``Trees/`` folders (i.e. the preprocessing directory returned
+            by :func:`preprocess`).
+        patch_option: Sky patch discretization option passed to the SVF
+            calculator.
+        overwrite: If False, tiles whose SVF outputs already exist are skipped.
     """
     import os
     import re
@@ -536,31 +547,26 @@ def thermal_comfort(
         landcover_filename:
             Optional land cover raster path or filename.
 
-        windcoeff_filename:
-            Optional wind coefficient input. Can be:
+        ERA_5_z0_find:
+            If True, compute directional wind-extension coefficients by calling
+            :func:`build_wind_ext_coeff` before preprocessing. This expects the
+            ERA5 file ``data_stream-oper_stepType-instant.nc`` (containing
+            forecast surface roughness, ``fsr``) to be present in
+            ``data_folder``; if it is not found, a warning is printed and the
+            run continues without wind coefficients. Set False to skip wind
+            coefficients.
 
-              - None:
-                    Do not use wind coefficients.
+            The generated rasters are::
 
-              - Folder path:
-                    Folder containing directional wind coefficient rasters:
-                    WindCoeff_dir000.tif
-                    WindCoeff_dir030.tif
-                    ...
-                    WindCoeff_dir330.tif
+                WindCoeff_dir000.tif
+                WindCoeff_dir030.tif
+                ...
+                WindCoeff_dir330.tif
 
-              - Glob pattern:
-                    Example: "WindCoeff_dir*.tif"
-
-              - Single legacy raster:
-                    Example: "WindCoeff.tif"
-
-            Relative paths are resolved against base_path.
-
-            If directional wind coefficients are provided, the metfile must contain
+            If directional wind coefficients are used, the metfile must contain
             wind direction column Wd. For ERA5 processing, Wd is generated from
-            u10/v10 as meteorological wind-from direction:
-              0=N, 90=E, 180=S, 270=W.
+            u10/v10 as meteorological wind-from direction
+            (0=N, 90=E, 180=S, 270=W).
 
             During UTCI calculation, the model selects the nearest 30-degree
             wind coefficient raster for each timestep.
@@ -616,6 +622,12 @@ def thermal_comfort(
 
         save_wbgt:
             Save WBGT output.
+
+        save_ta:
+            Save diagnostic air temperature field.
+
+        save_wind:
+            Save diagnostic wind speed field.
 
     Returns:
         None

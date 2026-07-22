@@ -51,6 +51,30 @@ UTCI Calculations
    :undoc-members:
    :show-inheritance:
 
+WBGT Calculations
+-----------------
+
+.. automodule:: solweig_gpu.calculate_wbgt
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+Wind Extension Coefficients
+---------------------------
+
+.. automodule:: solweig_gpu.wind_ext_coeff
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+Input Data Builder
+------------------
+
+.. automodule:: solweig_gpu.create_inputs
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 UTCI Processing
 ---------------
 

@@ -11,7 +11,31 @@ This guide will get you running SOLWEIG-GPU in minutes.
 
 ## Sample Data
 
-Sample data is available in [Zenodo](https://zenodo.org/records/18561860).
+Sample data is available in [Zenodo](https://doi.org/10.5281/zenodo.21081622).
+
+## Example 0 (Optional): Download Input Data Automatically
+
+New in Version 2: if you do not have input rasters for your study area, `build_inputs()` can download and build them from near-globally available urban datasets. This requires an authenticated [Google Earth Engine](https://earthengine.google.com/) project and the optional dependencies (`earthengine-api`, `geemap`, `geopandas`, `osmnx`).
+
+```python
+import os
+from solweig_gpu import build_inputs
+
+os.environ["EE_PROJECT"] = "your-gee-project-id"  # Your own GEE/GCP project ID
+
+base_path = build_inputs(
+    lat=30.27,
+    lon=-97.74,
+    city="Austin",
+    km_buffer=2,        # km from the central lat-lon to set the download extent
+    km_reduced_lat=1,
+    km_reduced_lon=1,
+    base_folder="/path/to/save/inputs",
+    resolution=2,       # spatial resolution of the generated rasters in meters
+)
+
+print("SOLWEIG input folder:", base_path)
+```
 
 ## Example 1: Using Your Own Met Data
 
@@ -60,7 +84,10 @@ thermal_comfort(
     data_source_type='ERA5',
     data_folder='/path/to/era5/files',
     start_time='2020-08-13 00:00:00',
-    end_time='2020-08-14 23:00:00'
+    end_time='2020-08-14 23:00:00',
+    ERA_5_z0_find=True,   # compute directional wind coefficients from ERA5 roughness (requires data_stream-oper_stepType-instant.nc in data_folder)
+    use_uhi=True,         # ERA5 only: diagnostic urban heat island intensity
+    save_wbgt=True,       # also save Wet Bulb Globe Temperature
 )
 ```
 When using ERA-5 dataset, the package can find the corresponding data for `start_time` and `end_time`. For example, if ERA-5 data is downloaded from 2020-08-13 00 UTC to 2020-08-14 23 UTC and the model is to be run from 2020-08-13 06 UTC to 2020-08-14 05 UTC, the package can select data from 2020-08-13 06 UTC to 2020-08-14 05 UTC by itself (selected_date_str = '2020-08-13', start_time = '2020-08-13 00:00:00', and end_time = '2020-08-14 23:00:00')
@@ -78,7 +105,9 @@ thermal_comfort(
     data_source_type='wrfout',
     data_folder='/path/to/wrfout/files',
     start_time='2020-08-13 06:00:00',
-    end_time='2020-08-14 05:00:00'
+    end_time='2020-08-14 05:00:00',
+    ERA_5_z0_find=False,  # set True only if data_folder also contains the ERA5 file data_stream-oper_stepType-instant.nc
+    use_uhi=False,        # always keep False with WRF forcing
 )
 ```
 When using wrfout, the `start_time` and `end_time` should be the first and last time stamps in the wrfout dataset. The package won't compare the selected `start_time` and `end_time` to the wrfout file timestamps and automatically fetch the corresponding data. 
@@ -178,9 +207,15 @@ thermal_comfort(
     save_lup=True,       # Upward longwave
     save_ldown=True,     # Downward longwave
     save_shadow=True,    # Shadow maps
+    save_wbgt=True,      # Wet Bulb Globe Temperature (new in v2)
+    save_ta=True,        # Diagnostic air temperature field (new in v2)
+    save_wind=True,      # Diagnostic wind speed field (new in v2)
     ...
 )
 ```
+
+!!! note "CLI options"
+    The Version 2 options (`ERA_5_z0_find`, `use_uhi`, `save_wbgt`, `save_ta`, `save_wind`) are currently available through the Python API and GUI; the `thermal_comfort` command-line interface exposes the v1 option set.
 ## GUI Usage
 
 To launch the GUI:
@@ -222,13 +257,14 @@ See [Outputs](outputs.md) for full details. Each time-varying `.tif` is a multi-
 
 ## Calling pipeline stages separately
 
-You can run the workflow in three steps: **preprocess** → **run_walls_aspect** → **run_utci_tiles**. This is useful to run only a subset of tiles or to reuse preprocessed data. The CLI and GUI still use the one-shot `thermal_comfort()`; no changes there.
+You can run the workflow in four steps: **preprocess** → **run_walls_aspect** → **calculate_svf** → **run_utci_tiles**. This is useful to run only a subset of tiles or to reuse preprocessed data. The CLI and GUI still use the one-shot `thermal_comfort()`; no changes there.
 
 ```python
-from solweig_gpu import preprocess, run_walls_aspect, run_utci_tiles
+from solweig_gpu import preprocess, run_walls_aspect, calculate_svf, run_utci_tiles
 
 preprocess_dir = preprocess(base_path=base_path, selected_date_str=date_str, ...)
 run_walls_aspect(preprocess_dir)
+calculate_svf(preprocess_dir, patch_option=2, overwrite=False)
 run_utci_tiles(base_path=base_path, preprocess_dir=preprocess_dir, selected_date_str=date_str, ...)
 ```
 

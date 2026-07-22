@@ -122,6 +122,36 @@ SVF is a geometric parameter that quantifies the openness of a location to the s
 
 **Saved when:** `save_shadow=True`
 
+### Wet Bulb Globe Temperature (WBGT) — New in Version 2
+
+**Filename:** `WBGT_X_Y.tif`  
+**Format:** Multi-band GeoTIFF  
+**Units:** °C  
+**Description:** The Wet Bulb Globe Temperature, a heat stress index widely used in occupational health and sports medicine. It is computed from the wet bulb temperature, black globe temperature (derived from Tmrt), and air temperature.
+
+**Saved when:** `save_wbgt=True`
+
+### Air Temperature (Ta) — New in Version 2
+
+**Filename:** `Ta_X_Y.tif`  
+**Format:** Multi-band GeoTIFF  
+**Units:** °C  
+**Description:** Diagnostic 2-m air temperature field used in the UTCI/WBGT calculation. When `use_uhi=True` with ERA5 forcing, this includes the diagnostic urban heat island intensity (UHII) adjustment.
+
+**Saved when:** `save_ta=True`
+
+### Wind Speed — New in Version 2
+
+**Filename:** `Wind_X_Y.tif`  
+**Format:** Multi-band GeoTIFF  
+**Units:** m/s  
+**Description:** Diagnostic 10-m wind speed field used in the UTCI calculation. When directional wind-extension coefficients are used (`ERA_5_z0_find=True` or `windcoeff_folder`), the wind field reflects the direction-dependent attenuation by buildings and vegetation.
+
+**Saved when:** `save_wind=True`
+
+!!! note "Urban heat island intensity (UHII)"
+    When `use_uhi=True` with ERA5 forcing, a diagnostic UHII (GLIDE-SOL scheme) is written into the generated metfiles during preprocessing and added to the air temperature in the UTCI/WBGT calculation.
+
 ## Multi-Band Structure
 
 Most outputs (except SVF) are saved as multi-band GeoTIFFs, where each band represents one hour of the simulation.

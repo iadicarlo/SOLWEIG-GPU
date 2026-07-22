@@ -17,7 +17,7 @@ try:
     from solweig_gpu import __version__
     release = __version__
 except ImportError:
-    release = '1.2.21'
+    release = '2.0.0'
 
 # -- General configuration ---------------------------------------------------
 extensions = [
@@ -86,6 +86,21 @@ autodoc_mock_imports = [
     'matplotlib',
     'matplotlib.path',
     'tqdm',  # Progress bar library
+    # Optional dependencies used by create_inputs / wind_ext_coeff / calculate_wbgt
+    'rasterio',
+    'rasterio.features',
+    'rasterio.merge',
+    'rasterio.transform',
+    'rasterio.warp',
+    'ee',
+    'geemap',
+    'geopandas',
+    'osmnx',
+    'geopy',
+    'geopy.geocoders',
+    'numba',
+    'pyproj',
+    'requests',
 ]
 
 # Additional autodoc settings to handle import errors
@@ -113,7 +128,6 @@ html_theme_options = {
     'sticky_navigation': True,
     'includehidden': True,
     'titles_only': False,
-    'display_version': True,
     # Uncomment to show logo without text:
     # 'logo_only': True,
     # 'style_nav_header_background': '#2980B9',  # Custom header color
@@ -130,6 +144,10 @@ intersphinx_mapping = {
 }
 
 # MyST parser settings (for Markdown)
+# Auto-generate anchors for headings up to level 4 so links like
+# configuration.md#base_path and developer_guide.md#pipeline-stages resolve.
+myst_heading_anchors = 4
+
 myst_enable_extensions = [
     "colon_fence",
     "deflist",

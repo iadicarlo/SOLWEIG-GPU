@@ -151,7 +151,8 @@ request = {
         "2m_temperature",
         "surface_pressure",
         "surface_solar_radiation_downwards",
-        "surface_thermal_radiation_downwards"
+        "surface_thermal_radiation_downwards",
+        "forecast_surface_roughness" # required only if ERA_5_z0_find=True (directional wind coefficients)
     ],
     "year": ["2000"], # change to the desired year
     "month": ["08"], # change to the desired month
@@ -182,6 +183,37 @@ client.retrieve(dataset, request).download()
    3.  When using the ERA-5 dataset, the package can find the corresponding data for `start_time` and `end_time`. For example, if ERA-5 data is downloaded from 2020-08-13 00 UTC to 2020-08-14 23 UTC and the model is to be run from 2020-08-13 06 UTC to 2020-08-14 05 UTC, the package can select data from 2020-08-13 06 UTC to 2020-08-14 05 UTC by itself (selected_date_str = '2020-08-13', start_time = '2020-08-13 00:00:00', and end_time = '2020-08-14 23:00:00')
     
 
+## Wind and UHI Configuration (New in Version 2)
+
+### `ERA_5_z0_find`
+
+**Type:** Boolean
+**Default:** `True`
+**Description:** If `True`, `thermal_comfort()` computes direction-based wind-extension coefficients (GLIDE-SOL scheme) before preprocessing, by calling `build_wind_ext_coeff()`. This requires the ERA5 instantaneous file `data_stream-oper_stepType-instant.nc` — containing the variable **forecast surface roughness** (`fsr`) — to be present in `data_folder`. If the file is not found, a warning is printed and the run continues without wind coefficients.
+
+```python
+ERA_5_z0_find = True   # requires data_stream-oper_stepType-instant.nc in data_folder
+```
+
+!!! note "Using WRF or a custom met file"
+    `ERA_5_z0_find=True` can also be used with WRF or custom-met runs, as long as the ERA5 instantaneous file is kept in `data_folder`. With a custom met file, wind directions (`Wd`) must be available for each time step. Otherwise set `ERA_5_z0_find=False`.
+
+### `use_uhi`
+
+**Type:** Boolean
+**Default:** `True`
+**Description:** If `True`, ERA5 preprocessing computes a diagnostic urban heat island intensity (UHII) and writes it into the generated metfiles; the UHII is added to the air temperature during UTCI/WBGT calculation. **Use only with ERA5 forcing** — keep `False` when using WRF output or a user-provided meteorological file.
+
+```python
+use_uhi = True   # ERA5 only
+```
+
+### `windcoeff_folder` (staged pipeline only)
+
+**Type:** String or None
+**Default:** `None`
+**Description:** When calling `preprocess()` directly, pass the folder (or glob pattern, or single legacy raster) containing the directional wind coefficient rasters `WindCoeff_dir000.tif` … `WindCoeff_dir330.tif` created by `build_wind_ext_coeff()`. Relative paths are resolved against `base_path`. In `thermal_comfort()` this is handled automatically through `ERA_5_z0_find`.
+
 ## Output Configuration
 
 Control which outputs are saved to disk. All outputs are optional except UTCI, which is always saved.
@@ -194,6 +226,9 @@ save_kdown = False    # Downwelling shortwave radiation
 save_lup = False      # Upwelling longwave radiation
 save_ldown = False    # Downwelling longwave radiation
 save_shadow = False   # Shadow maps
+save_wbgt = False     # Wet Bulb Globe Temperature (new in v2)
+save_ta = False       # Diagnostic air temperature field (new in v2)
+save_wind = False     # Diagnostic wind speed field (new in v2)
 ```
 
 **Output Descriptions:**
@@ -229,6 +264,10 @@ thermal_comfort(
     start_time='2020-08-13 06:00:00',  # UTC
     end_time='2020-08-13 23:00:00',    # UTC
     
+    # Wind coefficients and UHI (new in v2)
+    ERA_5_z0_find=True,   # requires data_stream-oper_stepType-instant.nc in data_folder
+    use_uhi=True,         # ERA5 only
+    
     # Output configuration
     save_tmrt=True,
     save_svf=True,
@@ -236,7 +275,10 @@ thermal_comfort(
     save_kdown=False,
     save_lup=False,
     save_ldown=False,
-    save_shadow=False
+    save_shadow=False,
+    save_wbgt=True,
+    save_ta=False,
+    save_wind=False
 )
 ```
 
