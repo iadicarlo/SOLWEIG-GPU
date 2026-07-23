@@ -41,7 +41,6 @@ setup(
         "timezonefinder",
         "xarray",
         "tqdm",
-        "PyQt5",
         "matplotlib"
     ],
     extras_require={
@@ -63,7 +62,6 @@ setup(
         'console_scripts': [
             'solweig_gpu=solweig_gpu.cli:main',
             'thermal_comfort=solweig_gpu.cli:main',
-            'solweig_gpu_gui=solweig_gpu.solweig_gpu_gui:main',
         ],
     },
 )

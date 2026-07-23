@@ -23,7 +23,7 @@ The test suite is organized into the following test modules:
 ### Special Tests
 - **test_cli.py** - Command-line interface tests
 - **test_gpu_smoke.py** - GPU availability tests (auto-skipped without CUDA)
-- **test_wrf_and_gui.py** - WRF parsing and GUI import tests
+- **test_wrf.py** - WRF filename parsing tests
 
 ## Running Tests Locally
 
@@ -34,8 +34,7 @@ Install test dependencies:
 ```bash
 conda create -n solweig python=3.10
 conda activate solweig
-conda install -c conda-forge gdal pytorch timezonefinder matplotlib sip
-pip install PyQt5
+conda install -c conda-forge gdal pytorch timezonefinder matplotlib
 pip install pytest coverage pytest-cov
 pip install -e .
 ```

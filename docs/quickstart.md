@@ -160,7 +160,7 @@ thermal_comfort \
     --use_own_met True \
     --own_metfile /path/to/ownmet.txt
 
-# Using ERA5
+# Using ERA5 (with v2 options)
 thermal_comfort \
     --base_path /path/to/data \
     --date 2020-08-13 \
@@ -170,8 +170,13 @@ thermal_comfort \
     --data_source_type ERA5 \
     --data_folder /path/to/era5 \
     --start "2020-08-13 00:00:00" \
-    --end "2020-08-14 23:00:00"
+    --end "2020-08-14 23:00:00" \
+    --era5_z0_find True \
+    --use_uhi True \
+    --save_wbgt True
 ```
+
+New in Version 2, the CLI also accepts `--era5_z0_find` (directional wind coefficients from ERA5 forecast surface roughness; defaults to `True` when `--data_folder` is provided), `--use_uhi` (diagnostic urban heat island intensity, ERA5 only), and the output flags `--save_wbgt`, `--save_ta`, and `--save_wind`. Use `thermal_comfort --help` for the full option list.
 
 ## Configuration Options
 
@@ -213,31 +218,6 @@ thermal_comfort(
     ...
 )
 ```
-
-!!! note "CLI options"
-    The Version 2 options (`ERA_5_z0_find`, `use_uhi`, `save_wbgt`, `save_ta`, `save_wind`) are currently available through the Python API and GUI; the `thermal_comfort` command-line interface exposes the v1 option set.
-## GUI Usage
-
-To launch the GUI:
-```bash
-conda activate solweig
-solweig_gpu_gui
-```
-
-![GUI](https://raw.githubusercontent.com/nvnsudharsan/solweig-gpu/main/GUI_new.png)
-
-### GUI Workflow
-1. Select the **base path** containing input datasets.
-2. Choose the **Building DSM**, **DEM**, **Tree DSM**, and **Land cover (optional)** raster files.
-3. Set the **tile size** (e.g., 600 or 1200 pixels).
-4. Select a **meteorological source** (`metfile`, `ERA5`, or `wrfout`):
-   - If `metfile`: Provide a `.txt` file.
-   - If `ERA5`: Provide a folder with both instantaneous and accumulated files.
-   - If `wrfout`: Provide a folder with WRF output NetCDF files.
-5. Set the **start** and **end times** in UTC (`YYYY-MM-DD HH:MM:SS`).
-6. Choose which outputs to generate (e.g., Tmrt, UTCI, radiation fluxes).
-7. Output will be saved in `output_folder/`, with subfolders for each tile (keyed by tile origin, e.g. `0_0`, `1000_0`).
-
 ## Output Files
 
 Results are saved in `{base_path}/output_folder/{tile_key}/`:
@@ -257,7 +237,7 @@ See [Outputs](outputs.md) for full details. Each time-varying `.tif` is a multi-
 
 ## Calling pipeline stages separately
 
-You can run the workflow in four steps: **preprocess** → **run_walls_aspect** → **calculate_svf** → **run_utci_tiles**. This is useful to run only a subset of tiles or to reuse preprocessed data. The CLI and GUI still use the one-shot `thermal_comfort()`; no changes there.
+You can run the workflow in four steps: **preprocess** → **run_walls_aspect** → **calculate_svf** → **run_utci_tiles**. This is useful to run only a subset of tiles or to reuse preprocessed data. The CLI still uses the one-shot `thermal_comfort()`; no changes there.
 
 ```python
 from solweig_gpu import preprocess, run_walls_aspect, calculate_svf, run_utci_tiles

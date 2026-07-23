@@ -102,8 +102,7 @@ We recommend using conda environment (please see [documentation](./docs/installa
 ```bash
 conda create -n solweig python=3.10
 conda activate solweig
-conda install -c conda-forge gdal cudnn pytorch timezonefinder matplotlib sip #cudnn is required only if you are using nvidia GPU
-pip install PyQt5
+conda install -c conda-forge gdal cudnn pytorch timezonefinder matplotlib #cudnn is required only if you are using nvidia GPU
 pip install solweig-gpu
 #if you have older versions installed
 pip install --upgrade solweig-gpu
@@ -424,40 +423,24 @@ thermal_comfort --base_path '/path/to/input' ^
                 --data_folder '/path/to/era5' ^
                 --start '2020-08-13 06:00:00' ^
                 --end '2020-08-13 23:00:00' ^
+                --era5_z0_find True ^
+                --use_uhi True ^
                 --save_tmrt True ^
                 --save_svf False ^
                 --save_kup False ^
                 --save_kdown False ^
                 --save_lup False ^
                 --save_ldown False ^
-                --save_shadow False
+                --save_shadow False ^
+                --save_wbgt True ^
+                --save_ta False ^
+                --save_wind False
 ```
+
+- `--era5_z0_find` computes directional wind-extension coefficients and requires `data_stream-oper_stepType-instant.nc` in `--data_folder`. It defaults to `True` when `--data_folder` is provided and `False` otherwise.
+- `--use_uhi` computes the diagnostic urban heat island intensity; use it only with ERA5 forcing (set `False` for WRF or your own meteorological file).
 
 > Tip: Use `--help` to list all CLI options.
-
----
-
-## GUI Usage
-
-To launch the GUI:
-```bash
-conda activate solweig
-solweig_gpu_gui
-```
-
-![GUI](https://raw.githubusercontent.com/nvnsudharsan/solweig-gpu/main/GUI_new.png)
-
-### GUI Workflow
-1. Select the **base path** containing input datasets.
-2. Choose the **Building DSM**, **DEM**, **Tree DSM**, and **Land cover (optional)** raster files.
-3. Set the **tile size** (e.g., 600 or 1200 pixels).
-4. Select a **meteorological source** (`metfile`, `ERA5`, or `wrfout`):
-   - If `metfile`: Provide a `.txt` file.
-   - If `ERA5`: Provide a folder with both instantaneous and accumulated files.
-   - If `wrfout`: Provide a folder with WRF output NetCDF files.
-5. Set the **start** and **end times** in UTC (`YYYY-MM-DD HH:MM:SS`).
-6. Choose which outputs to generate (e.g., Tmrt, UTCI, radiation fluxes).
-7. Output will be saved in `output_folder/`, with subfolders for each tile.
 
 ---
 

@@ -4,7 +4,7 @@ This section provides a detailed reference for the public functions of the SOLWE
 
 **Entry points (exported from `solweig_gpu`):**
 
-- **`thermal_comfort(...)`** – One-shot: runs wind-coefficient calculation (optional), preprocessing, wall/aspect, SVF, and UTCI in one call. Use this for normal runs (CLI and GUI call this).
+- **`thermal_comfort(...)`** – One-shot: runs wind-coefficient calculation (optional), preprocessing, wall/aspect, SVF, and UTCI in one call. Use this for normal runs (the `thermal_comfort` CLI calls this).
 - **`preprocess(...)`**, **`run_walls_aspect(preprocess_dir)`**, **`calculate_svf(...)`**, **`run_utci_tiles(...)`** – Staged execution: call these when you need to run preprocessing once, then wall/aspect, then SVF, then UTCI (optionally for a subset of tiles). See [Developer Guide – Pipeline stages](developer_guide.md#pipeline-stages).
 - **`build_inputs(...)`** – Download and build the required input rasters and meteorological data for a location from near-globally available datasets (requires Google Earth Engine authentication).
 - **`build_wind_ext_coeff(...)`** – Compute direction-based wind-extension coefficient rasters (GLIDE-SOL feature; requires ERA5 forecast surface roughness).

@@ -632,14 +632,13 @@ def thermal_comfort(
     Returns:
         None
     """
+    windcoeff_folder = None
     if ERA_5_z0_find:
         try:
             build_wind_ext_coeff(base_path, data_folder)
             windcoeff_folder = base_path
-        except:
+        except Exception:
             print('Could not find ERA-5 file with roughness length')
-    else:
-        windcoeff_folder = None
         
     preprocess_dir = preprocess(
         base_path=base_path,

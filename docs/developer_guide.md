@@ -16,7 +16,7 @@ SOLWEIG-GPU is a modular package that separates the different stages of the ther
 -   **Data Preprocessing**: Handles the validation, tiling, and extraction of input data.
 -   **Geometry Processing**: Calculates wall heights and aspects from the input rasters.
 -   **Core SOLWEIG Model**: The main radiation and thermal comfort calculation engine (including UTCI and WBGT), accelerated with PyTorch.
--   **Interfaces**: Provides both a command-line interface (CLI) and a graphical user interface (GUI) for user interaction.
+-   **Interfaces**: Provides a command-line interface (CLI) for user interaction. (The graphical user interface was removed in Version 2.)
 
 ## Pipeline Stages
 
