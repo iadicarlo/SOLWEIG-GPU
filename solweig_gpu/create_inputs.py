@@ -158,7 +158,7 @@ def build_paths(base: Path, city: str) -> Paths:
 
 # ------------------------------- Config ------------------------------------- #
 
-_DEFAULT_BASE_CANDIDATE = Path("/Users/andrea/Desktop/prova_tutto_insieme")
+_DEFAULT_BASE_CANDIDATE = Path("")
 # Default workspace root; fall back to this script's folder if the preferred base is absent.
 if _DEFAULT_BASE_CANDIDATE.exists():
     DEFAULT_BASE = str(_DEFAULT_BASE_CANDIDATE)
