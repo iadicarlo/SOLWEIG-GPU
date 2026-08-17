@@ -13,7 +13,7 @@
   <a href="https://www.gnu.org/licenses/gpl-3.0"><img src="https://img.shields.io/badge/License-GPLv3-%230ab5b3.svg" alt="License: GPL v3"></a>
   <a href="https://pepy.tech/projects/solweig-gpu"><img src="https://static.pepy.tech/personalized-badge/solweig-gpu?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=GREEN&left_text=downloads" alt="PyPI Downloads"></a>
   <a href="https://joss.theoj.org/papers/27faa2bf5f6058d981df8b565f8e9a34"><img src="https://joss.theoj.org/papers/27faa2bf5f6058d981df8b565f8e9a34/status.svg"></a>
-  <a href="https://doi.org/10.5194/gmd-19-7389-2026"><img src="https://shields.io" alt="DOI Link"></a>
+  <a href="https://doi.org/10.5194/gmd-19-7389-2026"><img src="https://doi.org/10.5194/gmd-19-7389-2026.svg" alt="EMD"></a>
   <a href="https://github.com/nvnsudharsan/solweig-gpu/actions/workflows/tests.yml"><img src="https://img.shields.io/badge/Tests-Passing-%23ffb703.svg" alt="Tests"></a>
 </p>
 
