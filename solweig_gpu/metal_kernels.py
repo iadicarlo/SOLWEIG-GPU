@@ -235,6 +235,224 @@ kernel void svf_accumulate(device const float* sh [[buffer(0)]],
     vegshmat[m] = v;
     vbshmat[m] = b;
 }
+
+// Hourly sky patch loops. Each thread takes one pixel and runs through the
+// patches in order, so every sum gets its terms in the same order as the
+// PyTorch loop. A term like scalar * mask * scalar * mask is mask * P, where
+// P is the product of the scalars computed by PyTorch with the masks set to
+// one: with 0/1 masks this gives the same bits, signed zeros included.
+// The patch matrices are (rows, cols, npatch), so a pixel's patches are
+// contiguous.
+
+// Sunlit and shaded test of shaded_or_sunlit for one pixel and patch.
+inline void sun_or_shade(float hsvf, float yi, float palt, float r2d, thread float& sp, thread float& shp) {
+    const float deg = atan(hsvf + yi) * r2d;
+    sp = (deg < palt) ? 1.0f : 0.0f;
+    shp = (deg > palt) ? 1.0f : 0.0f;
+}
+
+// First patch loop of define_patch_characteristics.
+// tab (npatch x 28): 0 Lsky_down, 1 Lsky_side, 2 veg side, 3 veg down,
+// 4-7 sky E S W N, 8-11 veg E S W N, 12 sun side, 13 shade side, 14 sun down,
+// 15 shade down, 16-19 sun E S W N, 20-23 shade E S W N, 24 yi, 25 patch altitude,
+// 26 rad2deg. flags: bits 0-3 directions E S W N, bit 4 sunlit wall branch.
+// acc planes: 0 Ldown_sky, 1 Lside_sky, 2 Lside_veg, 3 Ldown_veg, 4-7 Least
+// Lsouth Lwest Lnorth, 8 Lside_sun, 9 Lside_sh, 10 Ldown_sun, 11 Ldown_sh,
+// 12 Lside_ref, 13 Ldown_ref.
+kernel void lw_patches(device const float* shmat [[buffer(0)]],
+                       device const float* vegmat [[buffer(1)]],
+                       device const float* vbmat [[buffer(2)]],
+                       device const float* hsvf [[buffer(3)]],
+                       constant float* tab [[buffer(4)]],
+                       constant int* flags [[buffer(5)]],
+                       constant int* params [[buffer(6)]],
+                       device float* acc [[buffer(7)]],
+                       uint idx [[thread_position_in_grid]])
+{
+    const int npix = params[0];
+    const int np = params[1];
+    if ((int)idx >= npix) return;
+    float a[12];
+    for (int j = 0; j < 12; ++j) a[j] = acc[j * npix + idx];
+    const float h = hsvf[idx];
+    const ulong base = (ulong)idx * (ulong)np;
+    for (int i = 0; i < np; ++i) {
+        constant float* T = tab + i * 28;
+        const int fl = flags[i];
+        const float s = shmat[base + i];
+        const float v = vegmat[base + i];
+        const float b = vbmat[base + i];
+        const float tsky = (s == 1.0f && v == 1.0f) ? 1.0f : 0.0f;
+        const float tveg = (v == 0.0f || b == 0.0f) ? 1.0f : 0.0f;
+        const float tsh = ((1.0f - s) * b == 1.0f) ? 1.0f : 0.0f;
+        a[0] = a[0] + tsky * T[0];
+        a[1] = a[1] + tsky * T[1];
+        a[2] = a[2] + tveg * T[2];
+        a[3] = a[3] + tveg * T[3];
+        for (int d = 0; d < 4; ++d) {
+            if (fl & (1 << d)) {
+                a[4 + d] = a[4 + d] + tsky * T[4 + d];
+                a[4 + d] = a[4 + d] + tveg * T[8 + d];
+            }
+        }
+        if (fl & 16) {
+            float sp, shp;
+            sun_or_shade(h, T[24], T[25], T[26], sp, shp);
+            const float msun = sp * tsh;
+            const float msh = shp * tsh;
+            a[8] = a[8] + msun * T[12];
+            a[9] = a[9] + msh * T[13];
+            a[10] = a[10] + msun * T[14];
+            a[11] = a[11] + msh * T[15];
+            for (int d = 0; d < 4; ++d) {
+                if (fl & (1 << d)) {
+                    a[4 + d] = a[4 + d] + msun * T[16 + d];
+                    a[4 + d] = a[4 + d] + msh * T[20 + d];
+                }
+            }
+        } else {
+            a[9] = a[9] + tsh * T[13];
+            a[11] = a[11] + tsh * T[15];
+            for (int d = 0; d < 4; ++d) {
+                if (fl & (1 << d)) a[4 + d] = a[4 + d] + tsh * T[20 + d];
+            }
+        }
+    }
+    for (int j = 0; j < 12; ++j) acc[j * npix + idx] = a[j];
+}
+
+// Second patch loop of define_patch_characteristics (reflected longwave).
+// tab (npatch x 8): steradian, cos(alt), sin(alt), cos to E S W N.
+kernel void lw_reflected(device const float* shmat [[buffer(0)]],
+                         device const float* vegmat [[buffer(1)]],
+                         device const float* vbmat [[buffer(2)]],
+                         device const float* refl [[buffer(3)]],
+                         constant float* tab [[buffer(4)]],
+                         constant int* flags [[buffer(5)]],
+                         constant int* params [[buffer(6)]],
+                         device float* acc [[buffer(7)]],
+                         uint idx [[thread_position_in_grid]])
+{
+    const int npix = params[0];
+    const int np = params[1];
+    if ((int)idx >= npix) return;
+    float dirs[4];
+    for (int d = 0; d < 4; ++d) dirs[d] = acc[(4 + d) * npix + idx];
+    float side = acc[12 * npix + idx];
+    float down = acc[13 * npix + idx];
+    const float r = refl[idx];
+    const ulong base = (ulong)idx * (ulong)np;
+    for (int i = 0; i < np; ++i) {
+        constant float* T = tab + i * 8;
+        const int fl = flags[i];
+        const float s = shmat[base + i];
+        const float v = vegmat[base + i];
+        const float b = vbmat[base + i];
+        const float m = (s == 0.0f || v == 0.0f || b == 0.0f) ? 1.0f : 0.0f;
+        const float rs = r * T[0];
+        const float rsc = (rs * T[1]) * m;
+        side = side + rsc;
+        down = down + (rs * T[2]) * m;
+        for (int d = 0; d < 4; ++d) {
+            if (fl & (1 << d)) dirs[d] = dirs[d] + rsc * T[3 + d];
+        }
+    }
+    for (int d = 0; d < 4; ++d) acc[(4 + d) * npix + idx] = dirs[d];
+    acc[12 * npix + idx] = side;
+    acc[13 * npix + idx] = down;
+}
+
+// Anisotropic patch loop of Kside_veg_v2022a, cylinder (mode 1) or box (mode 0).
+// tab (npatch x 32): 0 lumChi, 1 steradian, 2 anglIncC, 3-6 anglInc E S W N,
+// 7 veg, 8 sun, 9 shade, 10 shade (no sun branch), 11-14 veg E S W N,
+// 15-18 sun E S W N, 19-22 shade E S W N, 23-26 shade E S W N (no sun branch),
+// 27 yi, 28 patch altitude, 29 rad2deg.
+// flags: bits 0-3 diffuse directions, bits 4-7 reflected directions, bit 8 sun branch.
+// acc planes: 0 KsideD, 1 Kref_veg, 2 Kref_sun, 3 Kref_sh, 4-7 diffRad E S W N,
+// 8-11 Kref_veg, 12-15 Kref_sun, 16-19 Kref_sh (E S W N).
+kernel void kside_patches(device const float* diffsh [[buffer(0)]],
+                          device const float* shmat [[buffer(1)]],
+                          device const float* vegmat [[buffer(2)]],
+                          device const float* vbmat [[buffer(3)]],
+                          device const float* hsvf [[buffer(4)]],
+                          constant float* tab [[buffer(5)]],
+                          constant int* flags [[buffer(6)]],
+                          constant int* params [[buffer(7)]],
+                          device float* acc [[buffer(8)]],
+                          uint idx [[thread_position_in_grid]])
+{
+    const int npix = params[0];
+    const int np = params[1];
+    const int cyl = params[2];
+    if ((int)idx >= npix) return;
+    float a[20];
+    for (int j = 0; j < 20; ++j) a[j] = acc[j * npix + idx];
+    const float h = hsvf[idx];
+    const ulong base = (ulong)idx * (ulong)np;
+    for (int i = 0; i < np; ++i) {
+        constant float* T = tab + i * 32;
+        const int fl = flags[i];
+        const float D = diffsh[base + i];
+        const float s = shmat[base + i];
+        const float v = vegmat[base + i];
+        const float b = vbmat[base + i];
+        const float tveg = (v == 0.0f || b == 0.0f) ? 1.0f : 0.0f;
+        const float tsh = ((1.0f - s) * b == 1.0f) ? 1.0f : 0.0f;
+        if (cyl) {
+            a[0] = a[0] + ((D * T[0]) * T[2]) * T[1];
+            a[1] = a[1] + tveg * T[7];
+            float sp, shp;
+            sun_or_shade(h, T[27], T[28], T[29], sp, shp);
+            a[2] = a[2] + (sp * tsh) * T[8];
+            a[3] = a[3] + (shp * tsh) * T[9];
+        } else {
+            for (int d = 0; d < 4; ++d) {
+                if (fl & (1 << d)) a[4 + d] = a[4 + d] + ((D * T[0]) * T[3 + d]) * T[1];
+            }
+            a[1] = a[1] + tveg * T[7];
+            for (int d = 0; d < 4; ++d) {
+                if (fl & (16 << d)) a[8 + d] = a[8 + d] + tveg * T[11 + d];
+            }
+            if (fl & 256) {
+                float sp, shp;
+                sun_or_shade(h, T[27], T[28], T[29], sp, shp);
+                const float msun = sp * tsh;
+                const float msh = shp * tsh;
+                a[2] = a[2] + msun * T[8];
+                a[3] = a[3] + msh * T[9];
+                for (int d = 0; d < 4; ++d) {
+                    if (fl & (16 << d)) {
+                        a[12 + d] = a[12 + d] + msun * T[15 + d];
+                        a[16 + d] = a[16 + d] + msh * T[19 + d];
+                    }
+                }
+            } else {
+                a[3] = a[3] + tsh * T[10];
+                for (int d = 0; d < 4; ++d) {
+                    if (fl & (16 << d)) a[16 + d] = a[16 + d] + tsh * T[23 + d];
+                }
+            }
+        }
+    }
+    for (int j = 0; j < 20; ++j) acc[j * npix + idx] = a[j];
+}
+
+// out += sum over patches of mat[..., i] * w[i], in patch order (aniLum).
+kernel void patch_weighted_sum(device const float* mat [[buffer(0)]],
+                               constant float* w [[buffer(1)]],
+                               constant int* params [[buffer(2)]],
+                               device float* out [[buffer(3)]],
+                               uint idx [[thread_position_in_grid]])
+{
+    const int npix = params[0];
+    const int np = params[1];
+    if ((int)idx >= npix) return;
+    float a = out[idx];
+    const ulong base = (ulong)idx * (ulong)np;
+    for (int i = 0; i < np; ++i) a = a + mat[base + i] * w[i];
+    out[idx] = a;
+}
+
 """
 
 _LIB = None
@@ -418,3 +636,55 @@ def svf_accumulate(acc, shmat, vegshmat, vbshvegshmat, sh, vegsh, vbshvegsh, wei
     w = torch.from_numpy(np.ascontiguousarray(weights, dtype=np.float32)).to(sh.device)
     lib.svf_accumulate(sh, vegsh, vbshvegsh, acc, shmat, vegshmat, vbshvegshmat, w, params,
                        threads=rows * cols)
+
+
+def _tables(device, tab, flags):
+    if isinstance(tab, torch.Tensor):
+        tab = tab.to(device=device, dtype=torch.float32).contiguous()
+    else:
+        tab = torch.as_tensor(np.ascontiguousarray(tab, dtype=np.float32)).to(device)
+    flags = torch.as_tensor(np.ascontiguousarray(flags, dtype=np.int32)).to(device)
+    return tab, flags
+
+
+def patch_matrices_ok(*mats):
+    """The hourly kernels read (rows, cols, npatch) float32 matrices directly."""
+    return metal_enabled(*mats) and all(m.dim() == 3 and m.is_contiguous() for m in mats)
+
+
+def lw_patches(shmat, vegmat, vbmat, hsvf, tab, flags, acc):
+    """First patch loop of define_patch_characteristics; adds into acc (14, rows, cols)."""
+    rows, cols, npatch = shmat.shape
+    tab, flags = _tables(shmat.device, tab, flags)
+    params = torch.tensor([rows * cols, npatch], dtype=torch.int32, device=shmat.device)
+    _library().lw_patches(shmat, vegmat, vbmat, hsvf.contiguous(), tab, flags, params, acc,
+                          threads=rows * cols)
+
+
+def lw_reflected(shmat, vegmat, vbmat, refl, tab, flags, acc):
+    """Reflected longwave loop of define_patch_characteristics; adds into acc."""
+    rows, cols, npatch = shmat.shape
+    tab, flags = _tables(shmat.device, tab, flags)
+    params = torch.tensor([rows * cols, npatch], dtype=torch.int32, device=shmat.device)
+    _library().lw_reflected(shmat, vegmat, vbmat, refl.contiguous(), tab, flags, params, acc,
+                            threads=rows * cols)
+
+
+def kside_patches(diffsh, shmat, vegmat, vbmat, hsvf, tab, flags, cyl, acc):
+    """Anisotropic patch loop of Kside_veg_v2022a; adds into acc (20, rows, cols)."""
+    rows, cols, npatch = shmat.shape
+    tab, flags = _tables(shmat.device, tab, flags)
+    params = torch.tensor([rows * cols, npatch, 1 if cyl else 0], dtype=torch.int32, device=shmat.device)
+    _library().kside_patches(diffsh, shmat, vegmat, vbmat, hsvf.contiguous(), tab, flags, params, acc,
+                             threads=rows * cols)
+
+
+def patch_weighted_sum(mat, weights, out):
+    """out += sum_i mat[:, :, i] * weights[i], added in patch order."""
+    rows, cols, npatch = mat.shape
+    if isinstance(weights, torch.Tensor):
+        w = weights.to(device=mat.device, dtype=torch.float32).contiguous()
+    else:
+        w = torch.as_tensor(np.ascontiguousarray(weights, dtype=np.float32)).to(mat.device)
+    params = torch.tensor([rows * cols, npatch], dtype=torch.int32, device=mat.device)
+    _library().patch_weighted_sum(mat, w, params, out, threads=rows * cols)

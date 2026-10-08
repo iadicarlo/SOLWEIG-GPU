@@ -35,12 +35,21 @@ def _scene(n=96, seed=1):
     return float(amax), t
 
 
-def _both(monkeypatch, fn):
+def _both(monkeypatch, fn, kernels=()):
+    """Run fn with the Metal kernels off and on; kernels names those that must run."""
+    from solweig_gpu import metal_kernels
+
+    calls = []
+    for name in kernels:
+        orig = getattr(metal_kernels, name)
+        monkeypatch.setattr(metal_kernels, name, lambda *a, _o=orig, _n=name, **k: (calls.append(_n), _o(*a, **k))[1])
     monkeypatch.setenv("SOLWEIG_METAL_KERNEL", "0")
     ref = [o.cpu().numpy() for o in fn()]
+    assert not calls
     monkeypatch.setenv("SOLWEIG_METAL_KERNEL", "1")
     assert metal_enabled(torch.zeros(1, device="mps"))
     new = [o.cpu().numpy() for o in fn()]
+    assert set(kernels) <= set(calls)
     return ref, new
 
 
@@ -104,5 +113,72 @@ def test_metal_svf_matches_pytorch(monkeypatch):
 
     amax, (a, veg, veg2, bush) = _scene(n=64, seed=4)
     ref, new = _both(monkeypatch, lambda: svf_calculator(2, torch.tensor(amax), a, veg, veg2, bush, 1.0))
+    for r, n in zip(ref, new):
+        np.testing.assert_array_equal(n, r)
+
+
+def _sky(seed=5, n=48):
+    """Patch matrices and per pixel inputs for the hourly anisotropic code."""
+    from solweig_gpu.shadow import svf_calculator
+
+    amax, (a, veg, veg2, bush) = _scene(n=n, seed=seed)
+    out = svf_calculator(2, torch.tensor(amax), a, veg, veg2, bush, 1.0)
+    svf, svfveg = out[0], out[11]
+    vegshmat, vbshvegshmat, shmat = out[15], out[16], out[17]
+    diffsh = torch.zeros_like(shmat)
+    for i in range(shmat.shape[2]):
+        diffsh[:, :, i] = shmat[:, :, i] - (1 - vegshmat[:, :, i]) * (1 - 0.03)
+    asvf = torch.acos(torch.sqrt(svf))
+    return out, shmat, vegshmat, vbshvegshmat, diffsh, asvf
+
+
+@mps
+@pytest.mark.parametrize("sun_alt,sun_azi", [(35.0, 140.0), (8.0, 290.0), (-5.0, 10.0)])
+def test_metal_lcyl_matches_pytorch(monkeypatch, sun_alt, sun_azi):
+    from solweig_gpu.solweig import Lcyl_v2022a, Perez_v3
+
+    out, shmat, vegshmat, vbshvegshmat, _, asvf = _sky()
+    dev = shmat.device
+    t = lambda v: torch.tensor(v, dtype=torch.float32, device=dev)
+    lv, _, _ = Perez_v3(90 - max(sun_alt, 1.0), sun_azi, t(120.0), t(400.0), 182, 1, 2)
+    gen = torch.Generator().manual_seed(1)
+    Lup = (400 + 60 * torch.rand(asvf.shape, generator=gen)).to(dev)
+
+    def run():
+        return Lcyl_v2022a(t(0.8), lv.clone(), t(24.0), t([[3.2]]), 0.9, Lup, shmat, vegshmat, vbshvegshmat,
+                           t(sun_alt), t(sun_azi), asvf.shape[0], asvf.shape[1], asvf)
+
+    ref, new = _both(monkeypatch, run, kernels=("lw_patches", "lw_reflected"))
+    for r, n in zip(ref, new):
+        np.testing.assert_array_equal(n, r)
+
+
+@mps
+@pytest.mark.parametrize("cyl", [1, 0])
+@pytest.mark.parametrize("sun_alt,sun_azi", [(35.0, 140.0), (12.0, 250.0)])
+def test_metal_kside_matches_pytorch(monkeypatch, cyl, sun_alt, sun_azi):
+    from solweig_gpu.solweig import Kside_veg_v2022a, Perez_v3
+
+    out, shmat, vegshmat, vbshvegshmat, diffsh, asvf = _sky(seed=6)
+    (svf, svfaveg, svfE, svfEaveg, svfEveg, svfN, svfNaveg, svfNveg, svfS, svfSaveg, svfSveg, svfveg,
+     svfW, svfWaveg, svfWveg) = out[:15]
+    dev = shmat.device
+    t = lambda v: torch.tensor(v, dtype=torch.float32, device=dev)
+    radI, radD, radG = t(500.0), t(120.0), t(450.0)
+    lv, _, _ = Perez_v3(90 - sun_alt, sun_azi, radD, radI, 182, 1, 2)
+    gen = torch.Generator().manual_seed(2)
+    rnd = lambda: torch.rand(asvf.shape, generator=gen).to(dev)
+    shadow = (rnd() > 0.4).float()
+    F_sh = rnd()
+    Kup = [rnd() * 50 for _ in range(4)]
+    # the box branch only works with a tensor azimuth (torch.where on a Python bool fails)
+    azi = sun_azi if cyl == 1 else t(sun_azi)
+
+    def run():
+        return Kside_veg_v2022a(radI, radD, radG, shadow, svfS, svfW, svfN, svfE, svfEveg, svfSveg, svfWveg,
+                                svfNveg, azi, sun_alt, t(0.03), 0., 0.2, F_sh, *Kup, cyl, lv, 1, diffsh,
+                                asvf.shape[0], asvf.shape[1], asvf, shmat, vegshmat, vbshvegshmat)
+
+    ref, new = _both(monkeypatch, run, kernels=("kside_patches",))
     for r, n in zip(ref, new):
         np.testing.assert_array_equal(n, r)

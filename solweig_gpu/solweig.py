@@ -27,6 +27,7 @@ import torch.nn.functional as F
 from scipy.ndimage import rotate
 from .shadow import create_patches
 from .metal_kernels import metal_enabled, shadow_metal, sunonsurface_sweep
+from . import metal_kernels as mk
 gdal.UseExceptions()
 
 def ensure_tensor(x, device=None):
@@ -535,6 +536,18 @@ def Kvikt_veg(svf, svfveg, vikttot):
     return viktveg, viktwall
 
 
+def _sun_yi(solar_altitude, solar_azimuth, patch_azimuth):
+    """Sun dependent part of shaded_or_sunlit; works on one patch or a vector of patches."""
+    # Patch azimuth in relation to sun azimuth
+    patch_to_sun_azi = torch.abs(solar_azimuth - patch_azimuth)
+
+    # Degrees to radians
+    deg2rad = torch.pi / 180.0
+    xi = torch.cos(patch_to_sun_azi * deg2rad)
+    yi = 2 * xi * torch.tan(solar_altitude * deg2rad)
+    return torch.where(yi > 0, 0.0, yi)
+
+
 def shaded_or_sunlit(solar_altitude, solar_azimuth, patch_altitude, patch_azimuth, asvf):
     """
     Determine if sky patches are shaded or sunlit.
@@ -551,18 +564,10 @@ def shaded_or_sunlit(solar_altitude, solar_azimuth, patch_altitude, patch_azimut
     """
     device = get_device()
 
-    # Patch azimuth in relation to sun azimuth
-    patch_to_sun_azi = torch.abs(solar_azimuth - patch_azimuth)
-
-    # Degrees to radians
-    deg2rad = torch.pi / 180.0
-
     # Radians to degrees
     rad2deg = 180.0 / torch.pi
-    xi = torch.cos(patch_to_sun_azi * deg2rad)
-    yi = 2 * xi * torch.tan(solar_altitude * deg2rad)
+    yi_ = _sun_yi(solar_altitude, solar_azimuth, patch_azimuth)
     hsvf = torch.tan(asvf)
-    yi_ = torch.where(yi > 0, 0.0, yi)
     tan_delta = hsvf + yi_
 
     # Degrees where below is in shade and above is sunlit
@@ -574,6 +579,50 @@ def shaded_or_sunlit(solar_altitude, solar_azimuth, patch_altitude, patch_azimut
     shaded_patches = sunlit_degrees > patch_altitude
 
     return sunlit_patches, shaded_patches
+
+def _kside_patches_metal(radI, radD, albedo, azimuth, altitude, t, cyl, patch_altitude, patch_azimuth,
+                         steradian, lumChi, deg2rad, asvf, diffsh, shmat, vegshmat, vbshvegshmat, rows, cols):
+    """Metal version of the anisotropic patch loop in Kside_veg_v2022a.
+
+    Returns the 20 sums as planes of one tensor, or None when a factor is not
+    a scalar. Per patch factors are the loop's PyTorch expressions with the
+    masks set to one.
+    """
+    device = shmat.device
+    sunlit_surface = ((albedo * (radI * torch.cos(altitude * deg2rad)) + (radD * 0.5)) / torch.pi)
+    shaded_surface = ((albedo * radD * 0.5) / torch.pi)
+    if any(torch.as_tensor(x).numel() != 1 for x in (sunlit_surface, shaded_surface)):
+        return None
+    n = patch_altitude.shape[0]
+    ONE = torch.ones(1, dtype=torch.bool, device=device)
+    ss, hs = sunlit_surface, shaded_surface
+    cos_alt = torch.cos(patch_altitude * deg2rad)
+    cosd = [torch.cos((ang - patch_azimuth + t) * deg2rad) for ang in (90, 180, 270, 0)]
+    angl = [torch.cos(patch_altitude * deg2rad) * c for c in cosd]
+    anglIncC = torch.cos(patch_altitude * deg2rad) * torch.cos(as_tensor(0.))
+    zero = torch.zeros(n, device=device)
+    cols_ = [lumChi, steradian, anglIncC] + angl
+    cols_ += [hs * ONE * steradian * cos_alt, ss * ONE * ONE * steradian * cos_alt,
+              hs * ONE * ONE * steradian * cos_alt, hs * ONE * steradian * cos_alt]
+    cols_ += [hs * steradian * cos_alt * ONE * c for c in cosd]
+    cols_ += [ss * ONE * steradian * cos_alt * ONE * c for c in cosd]
+    cols_ += [hs * ONE * steradian * cos_alt * ONE * c for c in cosd]
+    cols_ += [hs * steradian * cos_alt * ONE * c for c in cosd]
+    cols_ += [_sun_yi(altitude, azimuth, patch_azimuth), patch_altitude, zero + (180.0 / torch.pi), zero, zero]
+    tab = torch.stack([torch.broadcast_to(c.reshape(-1).to(torch.float32), (n,)) for c in cols_], dim=1)
+    assert tab.shape == (n, 32)
+
+    pa = patch_azimuth
+    azd = torch.abs(azimuth - patch_azimuth)
+    bits = [(pa > 360) | (pa <= 180), (pa > 90) & (pa <= 270), (pa > 180) & (pa <= 360), (pa > 270) | (pa <= 90),
+            (pa > 360) | (pa < 180), (pa > 90) & (pa < 270), (pa > 180) & (pa < 360), (pa > 270) | (pa < 90),
+            (azd > 90) & (azd < 270)]
+    flags = sum(b.reshape(-1).to(torch.int32) << k for k, b in enumerate(bits)).cpu().numpy()
+
+    acc = torch.zeros((20, rows, cols), device=device)
+    mk.kside_patches(diffsh, shmat, vegshmat, vbshvegshmat, torch.tan(asvf), tab, flags, cyl == 1, acc)
+    return acc
+
 
 def Kside_veg_v2022a(radI, radD, radG, shadow, svfS, svfW, svfN, svfE, svfEveg, svfSveg, svfWveg, svfNveg,
                      azimuth, altitude, psi, t, albedo, F_sh, KupE, KupS, KupW, KupN, cyl, lv, anisotropic_diffuse,
@@ -706,8 +755,22 @@ def Kside_veg_v2022a(radI, radD, radG, shadow, svfS, svfW, svfN, svfE, svfEveg, 
 
         lumChi = (patch_luminance * radD) / radTot
 
+        # On MPS one kernel runs the patch loop below with identical sums.
+        npatch_loop = patch_azimuth.shape[0]
+        kacc = None
+        if mk.patch_matrices_ok(diffsh, shmat, vegshmat, vbshvegshmat):
+            kacc = _kside_patches_metal(radI, radD, albedo, azimuth, altitude, t, cyl, patch_altitude, patch_azimuth,
+                                        steradian, lumChi, deg2rad, asvf, diffsh, shmat, vegshmat, vbshvegshmat,
+                                        rows, cols)
+        if kacc is not None:
+            npatch_loop = 0
+            (KsideD, Kref_veg, Kref_sun, Kref_sh, diffRadE, diffRadS, diffRadW, diffRadN,
+             Kref_veg_e, Kref_veg_s, Kref_veg_w, Kref_veg_n, Kref_sun_e, Kref_sun_s, Kref_sun_w, Kref_sun_n,
+             Kref_sh_e, Kref_sh_s, Kref_sh_w, Kref_sh_n) = kacc.unbind(0)
+            temp_vegsh = temp_vbsh = temp_sh = None
+
         if cyl == 1:
-            for idx in range(patch_azimuth.shape[0]):
+            for idx in range(npatch_loop):
                 anglIncC = torch.cos(patch_altitude[idx] * deg2rad) * torch.cos(as_tensor(0.))
                 KsideD += diffsh[:, :, idx] * lumChi[idx] * anglIncC * steradian[idx]
 
@@ -732,7 +795,7 @@ def Kside_veg_v2022a(radI, radD, radG, shadow, svfS, svfW, svfN, svfE, svfEveg, 
             Ksouth = KupS * 0.5
 
         else:
-            for idx in range(patch_azimuth.shape[0]):
+            for idx in range(npatch_loop):
                 if (patch_azimuth[idx] > 360) or (patch_azimuth[idx] <= 180):
                     anglIncE = torch.cos(patch_altitude[idx] * deg2rad) * torch.cos((90 - patch_azimuth[idx] + t) * deg2rad)
                     diffRadE += diffsh[:, :, idx] * lumChi[idx] * anglIncE * steradian[idx]
@@ -1436,6 +1499,70 @@ def model3(sky_patches, esky, Ta):
     return patch_emissivity_normalized, esky_band
 
 
+def _patch_characteristics_metal(solar_altitude, solar_azimuth, patch_altitude, patch_azimuth, asvf,
+                                 shmat, vegshmat, vbshvegshmat, Lsky_down, Lsky_side, Lup, Ta, Tgwall,
+                                 ewall, SBC, paz, ster, cos_alt, sin_alt, sun_azimuth, sun_up, rows, cols):
+    """Metal version of the two patch loops in define_patch_characteristics.
+
+    The per patch factors are the PyTorch expressions of the loop with every
+    mask set to one, so the kernel only multiplies them by the 0/1 masks and
+    adds them in patch order. Returns None when a factor is not a scalar.
+    """
+    device = shmat.device
+    rad = math.pi / 180
+    vegetation_surface = ((ewall * SBC * ((Ta + 273.15) ** 4)) / math.pi)
+    sunlit_surface = ((ewall * SBC * ((Ta + Tgwall + 273.15) ** 4)) / math.pi)
+    shaded_surface = ((ewall * SBC * ((Ta + 273.15) ** 4)) / math.pi)
+    if any(torch.as_tensor(x).numel() != 1 for x in (vegetation_surface, sunlit_surface, shaded_surface)):
+        return None
+    n = len(paz)
+    ONE = torch.ones(1, dtype=torch.bool, device=device)
+    f32 = lambda v: torch.tensor(v, dtype=torch.float32, device=device)
+    ster_t, cos_t, sin_t = f32(ster), f32(cos_alt), f32(sin_alt)
+    cosd = [f32([math.cos((ang - p) * rad) for p in paz]) for ang in (90, 180, 270, 0)]
+    Lsd = Lsky_down[:, 2]
+    Lss = Lsky_side[:, 2]
+    sun = [(abs(sun_azimuth - p) > 90) and (abs(sun_azimuth - p) < 270) and sun_up for p in paz]
+    dirs = [((p > 360) or (p < 180), (p > 90) and (p < 270), (p > 180) and (p < 360), (p > 270) or (p < 90))
+            for p in paz]
+    flags = [sum(1 << d for d in range(4) if dirs[i][d]) + (16 if sun[i] else 0) for i in range(n)]
+    sun_t = torch.tensor(sun, device=device)
+
+    cols_ = [ONE * Lsd, ONE * Lss,
+             vegetation_surface * ster_t * cos_t * ONE, vegetation_surface * ster_t * sin_t * ONE]
+    cols_ += [ONE * Lss * c for c in cosd]
+    cols_ += [vegetation_surface * ster_t * cos_t * ONE * c for c in cosd]
+    sel = lambda a, b: torch.where(sun_t, a.reshape(-1), b.reshape(-1))
+    zero = torch.zeros(n, device=device)
+    cols_ += [sunlit_surface * ONE * ster_t * cos_t * ONE,
+              sel(shaded_surface * ONE * ster_t * cos_t * ONE, shaded_surface * ster_t * cos_t * ONE),
+              sunlit_surface * ONE * ster_t * sin_t * ONE,
+              sel(shaded_surface * ONE * ster_t * sin_t * ONE, shaded_surface * ster_t * sin_t * ONE)]
+    cols_ += [sunlit_surface * ONE * ster_t * cos_t * ONE * c for c in cosd]
+    cols_ += [sel(shaded_surface * ONE * ster_t * cos_t * ONE * c, shaded_surface * ster_t * cos_t * ONE * c)
+              for c in cosd]
+    cols_ += [_sun_yi(solar_altitude, solar_azimuth, patch_azimuth), patch_altitude,
+              zero + (180.0 / torch.pi), zero]
+    tab = torch.stack([torch.broadcast_to(c.reshape(-1).to(torch.float32), (n,)) for c in cols_], dim=1)
+    assert tab.shape == (n, 28)
+
+    acc = torch.zeros((14, rows, cols), device=device)
+    hsvf = torch.tan(asvf)
+    mk.lw_patches(shmat, vegshmat, vbshvegshmat, hsvf, tab, flags, acc)
+
+    Ldown_sky = acc[0]
+    reflected_on_surfaces = (((Ldown_sky + Lup) * (1 - ewall) * 0.5) / math.pi)
+    tab2 = torch.stack([ster_t, cos_t, sin_t] + cosd + [zero], dim=1)
+    flags2 = [f & 15 for f in flags]
+    mk.lw_reflected(shmat, vegshmat, vbshvegshmat, reflected_on_surfaces, tab2, flags2, acc)
+
+    (Ldown_sky, Lside_sky, Lside_veg, Ldown_veg, Least, Lsouth, Lwest, Lnorth,
+     Lside_sun, Lside_sh, Ldown_sun, Ldown_sh, Lside_ref, Ldown_ref) = acc.unbind(0)
+    Lside = Lside_sky + Lside_veg + Lside_sh + Lside_sun + Lside_ref
+    Ldown = Ldown_sky + Ldown_veg + Ldown_sh + Ldown_sun + Ldown_ref
+    return Ldown, Lside, Lside_sky, Lside_veg, Lside_sh, Lside_sun, Lside_ref, Least, Lwest, Lnorth, Lsouth
+
+
 def define_patch_characteristics(solar_altitude, solar_azimuth,
                                  patch_altitude, patch_azimuth, steradian,
                                  asvf,
@@ -1512,6 +1639,13 @@ def define_patch_characteristics(solar_altitude, solar_azimuth,
     sin_alt = [math.sin(v * rad) for v in palt]
     sun_azimuth = float(solar_azimuth)
     sun_up = float(solar_altitude) > 0
+
+    if mk.patch_matrices_ok(shmat, vegshmat, vbshvegshmat) and Lup.shape == (rows, cols):
+        out = _patch_characteristics_metal(solar_altitude, solar_azimuth, patch_altitude, patch_azimuth, asvf,
+                                           shmat, vegshmat, vbshvegshmat, Lsky_down, Lsky_side, Lup, Ta, Tgwall,
+                                           ewall, SBC, paz, ster, cos_alt, sin_alt, sun_azimuth, sun_up, rows, cols)
+        if out is not None:
+            return out
 
     for idx in range(patch_altitude.shape[0]):
         # Calculations for patches on sky, shmat = 1 = sky is visible
@@ -2053,8 +2187,11 @@ def Solweig_2022a_calc(i, dsm, scale, rows, cols, svf, svfN, svfW, svfE, svfS, s
             lv, pc_, pb_ = Perez_v3(zenDeg.item(), azimuth.item(), radD, radI, jday.item(), patchchoice, patch_option)
             # Total relative luminance from sky, i.e. from each patch, into each cell
             aniLum = torch.zeros((rows, cols), device=device)
-            for idx in range(lv.shape[0]):
-                aniLum += diffsh[:,:,idx] * lv[idx,2]
+            if mk.patch_matrices_ok(diffsh) and lv.shape[0] == diffsh.shape[2]:
+                mk.patch_weighted_sum(diffsh, lv[:, 2], aniLum)
+            else:
+                for idx in range(lv.shape[0]):
+                    aniLum += diffsh[:,:,idx] * lv[idx,2]
 
             dRad = aniLum * radD   # Total diffuse radiation from sky into each cell
         else:
