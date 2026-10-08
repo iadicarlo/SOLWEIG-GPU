@@ -182,3 +182,33 @@ def test_metal_kside_matches_pytorch(monkeypatch, cyl, sun_alt, sun_azi):
     ref, new = _both(monkeypatch, run, kernels=("kside_patches",))
     for r, n in zip(ref, new):
         np.testing.assert_array_equal(n, r)
+
+
+@mps
+def test_metal_anilum_matches_pytorch(monkeypatch):
+    from solweig_gpu import metal_kernels
+
+    monkeypatch.setenv("SOLWEIG_METAL_KERNEL", "1")
+    _, shmat, vegshmat, vbshvegshmat, diffsh, _ = _sky(seed=7)
+    w = torch.rand(shmat.shape[2], generator=torch.Generator().manual_seed(3)).to(shmat.device)
+    ref = torch.zeros(shmat.shape[:2], device=shmat.device)
+    for idx in range(shmat.shape[2]):
+        ref += diffsh[:, :, idx] * w[idx]
+    codes = metal_kernels.patch_codes(shmat, vegshmat, vbshvegshmat)
+    lut = metal_kernels.diffsh_table(diffsh, codes)
+    assert lut is not None
+    new = torch.zeros_like(ref)
+    metal_kernels.patch_weighted_sum(codes, lut, w, new)
+    np.testing.assert_array_equal(new.cpu().numpy(), ref.cpu().numpy())
+
+
+@mps
+def test_patch_codes_reject_values_other_than_0_and_1(monkeypatch):
+    from solweig_gpu import metal_kernels
+
+    monkeypatch.setenv("SOLWEIG_METAL_KERNEL", "1")
+    m = torch.ones((4, 4, 3), device="mps")
+    bad = m.clone()
+    bad[1, 2, 0] = 0.5
+    assert metal_kernels.patch_codes(m, m.clone(), m.clone()) is not None
+    assert metal_kernels.patch_codes(bad, m.clone(), m.clone()) is None
