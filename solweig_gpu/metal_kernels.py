@@ -230,9 +230,10 @@ kernel void svf_accumulate(device const float* sh [[buffer(0)]],
         }
     }
     for (int j = 0; j < 15; ++j) acc[j * npix + idx] = a[j];
-    shmat[idx * npatch + patch] = s;
-    vegshmat[idx * npatch + patch] = v;
-    vbshmat[idx * npatch + patch] = b;
+    const ulong m = (ulong)idx * (ulong)npatch + (ulong)patch;   // can pass 2^31 on big tiles
+    shmat[m] = s;
+    vegshmat[m] = v;
+    vbshmat[m] = b;
 }
 """
 
