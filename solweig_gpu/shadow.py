@@ -335,7 +335,19 @@ def annulus_weight(altitude, aziinterval, device=None):
 
     return weight
 
+_PATCH_CACHE = {}
+
+
 def create_patches(patch_option):
+    """Sky patches for patch_option; on MPS built once and handed out as copies."""
+    if metal_enabled(torch.zeros(0, device=get_device())):
+        if patch_option not in _PATCH_CACHE:
+            _PATCH_CACHE[patch_option] = _create_patches(patch_option)
+        return tuple(t.clone() for t in _PATCH_CACHE[patch_option])
+    return _create_patches(patch_option)
+
+
+def _create_patches(patch_option):
     """
     Create patch configuration for sky hemisphere discretization.
     

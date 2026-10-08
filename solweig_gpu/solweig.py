@@ -665,6 +665,22 @@ def _kside_patches_metal(radI, radD, albedo, azimuth, altitude, t, cyl, patch_al
     return acc
 
 
+def _patch_steradians(patch_altitude, skyalt, skyalt_c, deg2rad):
+    """The steradian loop of Kside_veg_v2022a and Lcyl_v2022a as whole vector operations.
+
+    Same elementwise float32 operations per patch, without a host sync per
+    patch. Used on MPS only.
+    """
+    match = patch_altitude.reshape(-1, 1) == skyalt.reshape(1, -1)
+    cnt = (match.long() * skyalt_c.reshape(1, -1).long()).sum(dim=1)
+    prev = torch.roll(patch_altitude, 1)
+    several = ((360 / cnt) * deg2rad) * (torch.sin((patch_altitude + patch_altitude[0]) * deg2rad)
+                                          - torch.sin((patch_altitude - patch_altitude[0]) * deg2rad))
+    single = ((360 / cnt) * deg2rad) * (torch.sin((patch_altitude) * deg2rad)
+                                         - torch.sin((prev + patch_altitude[0]) * deg2rad))
+    return torch.where(cnt > 1, several, single).to(torch.float32)
+
+
 def Kside_veg_v2022a(radI, radD, radG, shadow, svfS, svfW, svfN, svfE, svfEveg, svfSveg, svfWveg, svfNveg,
                      azimuth, altitude, psi, t, albedo, F_sh, KupE, KupS, KupW, KupN, cyl, lv, anisotropic_diffuse,
                      diffsh, rows, cols, asvf, shmat, vegshmat, vbshvegshmat):
@@ -784,7 +800,16 @@ def Kside_veg_v2022a(radI, radD, radG, shadow, svfS, svfW, svfN, svfE, svfEveg, 
         skyalt, skyalt_c = torch.unique(patch_altitude, return_counts=True)
         radTot = torch.zeros(1, device=device)
         steradian = torch.zeros((patch_altitude.shape[0]), device=device)
-        for i in range(patch_altitude.shape[0]):
+        nloop = patch_altitude.shape[0]
+        if metal_enabled(patch_altitude, patch_luminance):
+            nloop = 0
+            steradian = _patch_steradians(patch_altitude, skyalt, skyalt_c, deg2rad)
+            terms = (patch_luminance * steradian * torch.sin(patch_altitude * deg2rad)).cpu().numpy()
+            total = np.float32(0)
+            for term in terms:  # in patch order, like radTot += ... below
+                total = np.float32(total + term)
+            radTot = torch.tensor([total], device=device)
+        for i in range(nloop):
             if skyalt_c[skyalt == patch_altitude[i]] > 1:
                 steradian[i] = ((360 / skyalt_c[skyalt == patch_altitude[i]]) * deg2rad) * (
                     torch.sin((patch_altitude[i] + patch_altitude[0]) * deg2rad) - torch.sin((patch_altitude[i] - patch_altitude[0]) * deg2rad))
@@ -1874,7 +1899,11 @@ def Lcyl_v2022a(esky, sky_patches, Ta, Tgwall, ewall, Lup, shmat, vegshmat, vbsh
 
     # Calculation of steradian for each patch
     steradian = torch.zeros(patch_altitude.shape[0], device=device)
-    for i in range(patch_altitude.shape[0]):
+    nloop = patch_altitude.shape[0]
+    if metal_enabled(patch_altitude):
+        nloop = 0
+        steradian = _patch_steradians(patch_altitude, skyalt, skyalt_c, deg2rad)
+    for i in range(nloop):
         # If there are more than one patch in a band
         if skyalt_c[skyalt == patch_altitude[i]] > 1:
             steradian[i] = ((360 / skyalt_c[skyalt == patch_altitude[i]]) * deg2rad) * (torch.sin((patch_altitude[i] + patch_altitude[0]) * deg2rad) \
@@ -1971,6 +2000,11 @@ def Lside_veg_v2022a(svfS, svfW, svfN, svfE, svfEveg, svfSveg, svfWveg, svfNveg,
     Returns:
         tuple: (Ldown, Lside, Least, Lwest, Lnorth, Lsouth) - Longwave components
     """
+
+    if anisotropic_longwave == 1 and metal_enabled(LupE, LupS, LupW, LupN):
+        # With the anisotropic sky only the ground terms below reach the
+        # result; on MPS skip the unused wall and sky terms.
+        return LupE * 0.5, LupS * 0.5, LupW * 0.5, LupN * 0.5
 
     device = get_device()
 
