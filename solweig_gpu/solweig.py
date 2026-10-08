@@ -26,6 +26,7 @@ from .device import get_device, empty_cache, as_tensor
 import torch.nn.functional as F
 from scipy.ndimage import rotate
 from .shadow import create_patches
+from .metal_kernels import metal_enabled, shadow_metal, sunonsurface_sweep
 gdal.UseExceptions()
 
 def ensure_tensor(x, device=None):
@@ -167,71 +168,81 @@ def sunonsurface_2018a(azimuthA, scale, buildings, shadow, sunwall, first, secon
     signsinazimuth = math.copysign(1., sinazimuth) if sinazimuth != 0 else 0.
     signcosazimuth = math.copysign(1., cosazimuth) if cosazimuth != 0 else 0.
 
-    for n in range(second):
-        if (pibyfour <= azimuth and azimuth < threetimespibyfour) or (fivetimespibyfour <= azimuth and azimuth < seventimespibyfour):
-            dy = signsinazimuth * index
-            dx = -1 * signcosazimuth * abs(round(index / tanazimuth))
-        else:
-            dy = signsinazimuth * abs(round(index * tanazimuth))
-            dx = -1 * signcosazimuth * index
+    if second >= 1 and metal_enabled(buildings, shadow, Lup, albshadow, alb, sunwall, Lwall, albedo_b):
+        w = sunonsurface_sweep(azimuthA, second, min(second, int(first)) - 1, buildings, shadow, Lup,
+                               albshadow, alb, sunwall, Lwall, albedo_b)
+        (weightsumsh, weightsumLupsh, weightsumalbsh, weightsumalbnosh, weightsumLwall, weightsumalbwall,
+         weightsumwall, weightsumalbwallnosh, weightsumsh_first, weightsumLupsh_first, weightsumalbsh_first,
+         weightsumalbnosh_first, weightsumLwall_first, weightsumalbwall_first, weightsumwall_first,
+         weightsumalbwallnosh_first) = w.unbind(0)
+        wallsuninfluence_first = weightsumwall_first > 0
+        wallinfluence_first = weightsumalbwallnosh_first > 0
+    else:
+        for n in range(second):
+            if (pibyfour <= azimuth and azimuth < threetimespibyfour) or (fivetimespibyfour <= azimuth and azimuth < seventimespibyfour):
+                dy = signsinazimuth * index
+                dx = -1 * signcosazimuth * abs(round(index / tanazimuth))
+            else:
+                dy = signsinazimuth * abs(round(index * tanazimuth))
+                dx = -1 * signcosazimuth * index
 
-        absdx = abs(dx)
-        absdy = abs(dy)
+            absdx = abs(dx)
+            absdy = abs(dy)
 
-        xc1 = int((dx + absdx) / 2)
-        xc2 = int(sizex + (dx - absdx) / 2)
-        yc1 = int((dy + absdy) / 2)
-        yc2 = int(sizey + (dy - absdy) / 2)
+            xc1 = int((dx + absdx) / 2)
+            xc2 = int(sizex + (dx - absdx) / 2)
+            yc1 = int((dy + absdy) / 2)
+            yc2 = int(sizey + (dy - absdy) / 2)
 
-        xp1 = -int((dx - absdx) / 2)
-        xp2 = int(sizex - (dx + absdx) / 2)
-        yp1 = -int((dy - absdy) / 2)
-        yp2 = int(sizey - (dy + absdy) / 2)
+            xp1 = -int((dx - absdx) / 2)
+            xp2 = int(sizex - (dx + absdx) / 2)
+            yp1 = -int((dy - absdy) / 2)
+            yp2 = int(sizey - (dy + absdy) / 2)
 
-        tempbu[xp1:xp2, yp1:yp2] = buildings[xc1:xc2, yc1:yc2]
-        tempsh[xp1:xp2, yp1:yp2] = shadow[xc1:xc2, yc1:yc2]
-        tempLupsh[xp1:xp2, yp1:yp2] = Lup[xc1:xc2, yc1:yc2]
-        tempalbsh[xp1:xp2, yp1:yp2] = albshadow[xc1:xc2, yc1:yc2]
-        tempalbnosh[xp1:xp2, yp1:yp2] = alb[xc1:xc2, yc1:yc2]
-        f = torch.min(f, tempbu)
+            tempbu[xp1:xp2, yp1:yp2] = buildings[xc1:xc2, yc1:yc2]
+            tempsh[xp1:xp2, yp1:yp2] = shadow[xc1:xc2, yc1:yc2]
+            tempLupsh[xp1:xp2, yp1:yp2] = Lup[xc1:xc2, yc1:yc2]
+            tempalbsh[xp1:xp2, yp1:yp2] = albshadow[xc1:xc2, yc1:yc2]
+            tempalbnosh[xp1:xp2, yp1:yp2] = alb[xc1:xc2, yc1:yc2]
+            f = torch.min(f, tempbu)
 
-        shadow2 = tempsh * f
-        weightsumsh += shadow2
+            shadow2 = tempsh * f
+            weightsumsh += shadow2
 
-        Lupsh = tempLupsh * f
-        weightsumLupsh += Lupsh
+            Lupsh = tempLupsh * f
+            weightsumLupsh += Lupsh
 
-        albsh = tempalbsh * f
-        weightsumalbsh += albsh
+            albsh = tempalbsh * f
+            weightsumalbsh += albsh
 
-        albnosh = tempalbnosh * f
-        weightsumalbnosh += albnosh
+            albnosh = tempalbnosh * f
+            weightsumalbnosh += albnosh
 
-        tempwallsun[xp1:xp2, yp1:yp2] = sunwall[xc1:xc2, yc1:yc2]
-        tempb = tempwallsun * f
-        tempbwall = f * -1 + 1
-        tempbub = ((tempb + tempbub) > 0).float()
-        tempbubwall = ((tempbwall + tempbubwall) > 0).float()
-        weightsumLwall += tempbub * Lwall
-        weightsumalbwall += tempbub * albedo_b
-        weightsumwall += tempbub
-        weightsumalbwallnosh += tempbubwall * albedo_b
+            tempwallsun[xp1:xp2, yp1:yp2] = sunwall[xc1:xc2, yc1:yc2]
+            tempb = tempwallsun * f
+            tempbwall = f * -1 + 1
+            tempbub = ((tempb + tempbub) > 0).float()
+            tempbubwall = ((tempbwall + tempbubwall) > 0).float()
+            weightsumLwall += tempbub * Lwall
+            weightsumalbwall += tempbub * albedo_b
+            weightsumwall += tempbub
+            weightsumalbwallnosh += tempbubwall * albedo_b
 
-        ind = 1
-        if (n + 1) <= first:
-            weightsumwall_first = weightsumwall / ind
-            weightsumsh_first = weightsumsh / ind
-            wallsuninfluence_first = weightsumwall_first > 0
-            weightsumLwall_first = weightsumLwall / ind
-            weightsumLupsh_first = weightsumLupsh / ind
+            ind = 1
+            if (n + 1) <= first:
+                weightsumwall_first = weightsumwall / ind
+                weightsumsh_first = weightsumsh / ind
+                wallsuninfluence_first = weightsumwall_first > 0
+                weightsumLwall_first = weightsumLwall / ind
+                weightsumLupsh_first = weightsumLupsh / ind
 
-            weightsumalbwall_first = weightsumalbwall / ind
-            weightsumalbsh_first = weightsumalbsh / ind
-            weightsumalbwallnosh_first = weightsumalbwallnosh / ind
-            weightsumalbnosh_first = weightsumalbnosh / ind
-            wallinfluence_first = weightsumalbwallnosh_first > 0
-            ind += 1
-        index += 1
+                weightsumalbwall_first = weightsumalbwall / ind
+                weightsumalbsh_first = weightsumalbsh / ind
+                weightsumalbwallnosh_first = weightsumalbwallnosh / ind
+                weightsumalbnosh_first = weightsumalbnosh / ind
+                wallinfluence_first = weightsumalbwallnosh_first > 0
+                ind += 1
+            index += 1
 
     wallsuninfluence_second = weightsumwall > 0
     wallinfluence_second = weightsumalbwallnosh > 0
@@ -284,7 +295,7 @@ def sunonsurface_2018a(azimuthA, scale, buildings, shadow, sunwall, first, secon
     gvfalbnosh = (gvfalbnosh1 * 0.5 + gvfalbnosh2 * 0.4) / 0.9
     gvfalbnosh = gvfalbnosh * buildings + alb_grid * (buildings * -1 + 1)
 
-    del tempbu,tempsh,tempLupsh,tempalbsh,tempalbnosh,shadow2,Lupsh,albsh,albnosh,tempwallsun,tempb,tempbwall,tempbub,tempbubwall
+    del tempbu, tempsh, tempLupsh, tempalbsh, tempalbnosh, tempwallsun, tempbub, tempbubwall
 
     del weightsumLupsh ,weightsumLwall ,weightsumalbsh ,weightsumalbwall ,weightsumalbnosh ,weightsumalbwallnosh,weightsumsh ,weightsumwall
 
@@ -1059,15 +1070,8 @@ def shadowingfunction_wallheight_13(a, azimuth, altitude, scale, walls, aspect):
     return sh, wallsh, wallsun, facesh, facesun
 
 
-def shadowingfunction_wallheight_23(a, vegdem, vegdem2, azimuth, altitude, scale, amaxvalue, bush, walls, aspect):
-    """
-    Calculate shadow patterns with vegetation and wall heights (method 2.3).
-    
-    Extended shadow calculation including vegetation layers and building walls.
-    
-    Returns:
-        tuple: Shadow components including vegetation effects
-    """
+def _wallheight_23_raymarch(a, vegdem, vegdem2, azimuth, altitude, scale, amaxvalue, bush):
+    """PyTorch ray march of shadowingfunction_wallheight_23, one array shift per step."""
     device = a.device
     # Loop bookkeeping in plain Python numbers: device scalars here force a
     # host/device sync per step, which is very slow on Apple MPS.
@@ -1091,7 +1095,6 @@ def shadowingfunction_wallheight_23(a, vegdem, vegdem2, azimuth, altitude, scale
     vegsh = torch.zeros((sizex, sizey), device=device) + bushplant
     f = a
     shvoveg = vegdem
-    wallbol = (walls > 0).float()
     pibyfour = math.pi / 4.0
     threetimespibyfour = 3 * pibyfour
     fivetimespibyfour = 5 * pibyfour
@@ -1157,6 +1160,40 @@ def shadowingfunction_wallheight_23(a, vegdem, vegdem2, azimuth, altitude, scale
         vbshvegsh = vbshvegsh + vegsh
         index += 1
 
+    sh = 1 - sh
+    vbshvegsh = torch.where(vbshvegsh > 0, as_tensor(1.0, device=device), vbshvegsh)
+    vbshvegsh = vbshvegsh - vegsh
+
+    vegsh = torch.where(vegsh > 0, as_tensor(1.0, device=device), vegsh)
+    shvoveg = (shvoveg - a) * vegsh  # Vegetation shadow volume
+    vegsh = 1 - vegsh
+    vbshvegsh = 1 - vbshvegsh
+
+    del fabovea, gabovea, lastfabovea, lastgabovea, vegsh2
+    del tempvegdem, tempvegdem2, templastfabovea, templastgabovea
+    return sh, vegsh, vbshvegsh, f, shvoveg
+
+
+def shadowingfunction_wallheight_23(a, vegdem, vegdem2, azimuth, altitude, scale, amaxvalue, bush, walls, aspect):
+    """
+    Calculate shadow patterns with vegetation and wall heights (method 2.3).
+    
+    Extended shadow calculation including vegetation layers and building walls.
+    
+    Returns:
+        tuple: Shadow components including vegetation effects
+    """
+    device = a.device
+    if metal_enabled(a, vegdem, vegdem2, bush):
+        sh, vegsh, vbshvegsh, f, shvoveg = shadow_metal(amaxvalue, a, vegdem, vegdem2, bush, azimuth,
+                                                        altitude, scale, volumes=True)
+        shvoveg = (shvoveg - a) * (1 - vegsh)  # Vegetation shadow volume
+    else:
+        sh, vegsh, vbshvegsh, f, shvoveg = _wallheight_23_raymarch(a, vegdem, vegdem2, azimuth, altitude,
+                                                                   scale, amaxvalue, bush)
+    azimuth = float(azimuth) * (math.pi / 180.0)
+    wallbol = (walls > 0).float()
+
     azilow = azimuth - math.pi / 2
     azihigh = azimuth + math.pi / 2
     if azilow >= 0 and azihigh < 2 * torch.pi:    # 90 to 270  (SHADOW)
@@ -1167,15 +1204,6 @@ def shadowingfunction_wallheight_23(a, vegdem, vegdem2, azimuth, altitude, scale
     elif azilow > 0 and azihigh >= 2 * torch.pi:    # 270 to 360
         azihigh -= 2 * torch.pi
         facesh = torch.logical_or(aspect > azilow, aspect <= azihigh).float() * -1 + 1
-
-    sh = 1 - sh
-    vbshvegsh = torch.where(vbshvegsh > 0, as_tensor(1.0, device=device), vbshvegsh)
-    vbshvegsh = vbshvegsh - vegsh
-
-    vegsh = torch.where(vegsh > 0, as_tensor(1.0, device=device), vegsh)
-    shvoveg = (shvoveg - a) * vegsh  # Vegetation shadow volume
-    vegsh = 1 - vegsh
-    vbshvegsh = 1 - vbshvegsh
 
     shvo = f - a   # building shadow volume
     facesun = torch.logical_and(facesh + wallbol == 1, walls > 0).float()
@@ -1191,8 +1219,7 @@ def shadowingfunction_wallheight_23(a, vegdem, vegdem2, azimuth, altitude, scale
     wallsun = torch.where(wallsun < 0, as_tensor(0.0, device=device), wallsun)
     wallshve = torch.where(wallshve > walls, walls, wallshve)
 
-    del fabovea,gabovea,lastfabovea,lastgabovea,vegsh2
-    del tempvegdem,tempvegdem2,templastfabovea,templastgabovea,shvoveg,wallbol
+    del shvoveg, wallbol
 
     return vegsh, sh, vbshvegsh, wallsh, wallsun, wallshve, facesh, facesun
 

@@ -23,6 +23,7 @@ import calendar
 import scipy.ndimage.interpolation as sc
 import torch
 from .device import get_device, empty_cache, as_tensor
+from .metal_kernels import metal_enabled, shadow_metal
 import torch.nn.functional as F
 from scipy.ndimage import rotate
 import time
@@ -192,6 +193,12 @@ def shadow(amaxvalue, a, vegdem, vegdem2, bush, azimuth, altitude, scale):
         - Implements anisotropic shadow casting
         - Accounts for vegetation transmittance
     """
+    # On Apple GPUs a fused Metal kernel does the whole ray march in one pass
+    # with identical results (see metal_kernels.py). SOLWEIG_METAL_KERNEL=0
+    # turns it off.
+    if metal_enabled(a, vegdem, vegdem2, bush):
+        return shadow_metal(amaxvalue, a, vegdem, vegdem2, bush, azimuth, altitude, scale)
+
     # Vegetation shadows follow UMEP's current shadowingfunction_20: the ray
     # also tests the previous step, so it cannot jump over a thin crown. The
     # older scheme (vegsh2 = fabovea - gabovea) missed canopy and let too much
