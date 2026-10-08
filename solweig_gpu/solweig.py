@@ -122,7 +122,9 @@ def sunonsurface_2018a(azimuthA, scale, buildings, shadow, sunwall, first, secon
     wallbol = (walls > 0).float()
     sunwall[sunwall > 0] = 1
 
-    azimuth = azimuthA * (torch.pi / 180)
+    # Loop bookkeeping in plain Python numbers: device scalars here force a
+    # host/device sync per step, which is very slow on Apple MPS.
+    azimuth = float(azimuthA) * (math.pi / 180)
 
     index = 0
     f = buildings
@@ -141,10 +143,10 @@ def sunonsurface_2018a(azimuthA, scale, buildings, shadow, sunwall, first, secon
     tempwallsun = torch.zeros((sizex, sizey), device=device)
     weightsumsh = torch.zeros((sizex, sizey), device=device)
     weightsumwall = torch.zeros((sizex, sizey), device=device)
-    first = torch.round(first * scale)
+    first = float(round(float(first) * float(scale)))
     if first < 1:
         first = 1
-    second = torch.round(second * scale)
+    second = int(round(float(second) * float(scale)))
     weightsumLupsh = torch.zeros((sizex, sizey), device=device)
     weightsumLwall = torch.zeros((sizex, sizey), device=device)
     weightsumalbsh = torch.zeros((sizex, sizey), device=device)
@@ -159,32 +161,32 @@ def sunonsurface_2018a(azimuthA, scale, buildings, shadow, sunwall, first, secon
     threetimespibyfour = 3 * pibyfour
     fivetimespibyfour = 5 * pibyfour
     seventimespibyfour = 7 * pibyfour
-    sinazimuth = torch.sin(azimuth)
-    cosazimuth = torch.cos(azimuth)
-    tanazimuth = torch.tan(azimuth)
-    signsinazimuth = torch.sign(sinazimuth)
-    signcosazimuth = torch.sign(cosazimuth)
+    sinazimuth = math.sin(azimuth)
+    cosazimuth = math.cos(azimuth)
+    tanazimuth = math.tan(azimuth)
+    signsinazimuth = math.copysign(1., sinazimuth) if sinazimuth != 0 else 0.
+    signcosazimuth = math.copysign(1., cosazimuth) if cosazimuth != 0 else 0.
 
-    for n in torch.arange(0, second, device=device):
+    for n in range(second):
         if (pibyfour <= azimuth and azimuth < threetimespibyfour) or (fivetimespibyfour <= azimuth and azimuth < seventimespibyfour):
             dy = signsinazimuth * index
-            dx = -1 * signcosazimuth * torch.abs(torch.round(index / tanazimuth))
+            dx = -1 * signcosazimuth * abs(round(index / tanazimuth))
         else:
-            dy = signsinazimuth * torch.abs(torch.round(index * tanazimuth))
+            dy = signsinazimuth * abs(round(index * tanazimuth))
             dx = -1 * signcosazimuth * index
 
-        absdx = torch.abs(dx)
-        absdy = torch.abs(dy)
+        absdx = abs(dx)
+        absdy = abs(dy)
 
-        xc1 = ((dx + absdx) / 2).int()
-        xc2 = (sizex + (dx - absdx) / 2).int()
-        yc1 = ((dy + absdy) / 2).int()
-        yc2 = (sizey + (dy - absdy) / 2).int()
+        xc1 = int((dx + absdx) / 2)
+        xc2 = int(sizex + (dx - absdx) / 2)
+        yc1 = int((dy + absdy) / 2)
+        yc2 = int(sizey + (dy - absdy) / 2)
 
-        xp1 = -((dx - absdx) / 2).int()
-        xp2 = (sizex - (dx + absdx) / 2).int()
-        yp1 = -((dy - absdy) / 2).int()
-        yp2 = (sizey - (dy + absdy) / 2).int()
+        xp1 = -int((dx - absdx) / 2)
+        xp2 = int(sizex - (dx + absdx) / 2)
+        yp1 = -int((dy - absdy) / 2)
+        yp2 = int(sizey - (dy + absdy) / 2)
 
         tempbu[xp1:xp2, yp1:yp2] = buildings[xc1:xc2, yc1:yc2]
         tempsh[xp1:xp2, yp1:yp2] = shadow[xc1:xc2, yc1:yc2]
@@ -234,8 +236,8 @@ def sunonsurface_2018a(azimuthA, scale, buildings, shadow, sunwall, first, secon
     wallsuninfluence_second = weightsumwall > 0
     wallinfluence_second = weightsumalbwallnosh > 0
 
-    azilow = azimuth - torch.pi / 2
-    azihigh = azimuth + torch.pi / 2
+    azilow = azimuth - math.pi / 2
+    azihigh = azimuth + math.pi / 2
     if azilow >= 0 and azihigh < 2 * torch.pi:
         facesh = (torch.logical_or(aspect < azilow, aspect >= azihigh).float() - wallbol + 1)
     elif azilow < 0 and azihigh <= 2 * torch.pi:
@@ -1483,6 +1485,16 @@ def define_patch_characteristics(solar_altitude, solar_azimuth,
     Lsouth = torch.zeros((rows, cols), device=device)
 
     ewall = as_tensor(ewall, device=device).clone().detach()
+    # Per patch angles as Python floats, so the branch tests below do not force
+    # a host/device sync for every sky patch (very slow on Apple MPS).
+    rad = math.pi / 180
+    paz = [float(v) for v in torch.as_tensor(patch_azimuth).flatten().tolist()]
+    palt = [float(v) for v in torch.as_tensor(patch_altitude).flatten().tolist()]
+    ster = [float(v) for v in torch.as_tensor(steradian).flatten().tolist()]
+    cos_alt = [math.cos(v * rad) for v in palt]
+    sin_alt = [math.sin(v * rad) for v in palt]
+    sun_azimuth = float(solar_azimuth)
+    sun_up = float(solar_altitude) > 0
 
     for idx in range(patch_altitude.shape[0]):
         # Calculations for patches on sky, shmat = 1 = sky is visible
@@ -1497,102 +1509,102 @@ def define_patch_characteristics(solar_altitude, solar_azimuth,
         # Calculations for patches that are vegetation, vegshmat = 0 = shade from vegetation
         temp_vegsh = ((vegshmat[:, :, idx] == 0) | (vbshvegshmat[:, :, idx] == 0))
         # Longwave radiation from vegetation surface (considered vertical)
-        vegetation_surface = ((ewall * SBC * ((Ta + 273.15) ** 4)) / as_tensor(np.pi, device=device))
+        vegetation_surface = ((ewall * SBC * ((Ta + 273.15) ** 4)) / math.pi)
 
         # Longwave radiation reaching a vertical surface
-        Lside_veg += vegetation_surface * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_vegsh
+        Lside_veg += vegetation_surface * ster[idx] * cos_alt[idx] * temp_vegsh
 
         # Longwave radiation reaching a horizontal surface
-        Ldown_veg += vegetation_surface * steradian[idx] * torch.sin(patch_altitude[idx] * deg2rad) * temp_vegsh
+        Ldown_veg += vegetation_surface * ster[idx] * sin_alt[idx] * temp_vegsh
 
         # Portion into cardinal directions to be used for standing box or POI output
-        if (patch_azimuth[idx] > 360) or (patch_azimuth[idx] < 180):
-            Least += temp_sky * Lsky_side[idx, 2] * torch.cos((90 - patch_azimuth[idx]) * deg2rad)
-            Least += vegetation_surface * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_vegsh * torch.cos((90 - patch_azimuth[idx]) * deg2rad)
-        if (patch_azimuth[idx] > 90) and (patch_azimuth[idx] < 270):
-            Lsouth += temp_sky * Lsky_side[idx, 2] * torch.cos((180 - patch_azimuth[idx]) * deg2rad)
-            Lsouth += vegetation_surface * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_vegsh * torch.cos((180 - patch_azimuth[idx]) * deg2rad)
-        if (patch_azimuth[idx] > 180) and (patch_azimuth[idx] < 360):
-            Lwest += temp_sky * Lsky_side[idx, 2] * torch.cos((270 - patch_azimuth[idx]) * deg2rad)
-            Lwest += vegetation_surface * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_vegsh * torch.cos((270 - patch_azimuth[idx]) * deg2rad)
-        if (patch_azimuth[idx] > 270) or (patch_azimuth[idx] < 90):
-            Lnorth += temp_sky * Lsky_side[idx, 2] * torch.cos((0 - patch_azimuth[idx]) * deg2rad)
-            Lnorth += vegetation_surface * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_vegsh * torch.cos((0 - patch_azimuth[idx]) * deg2rad)
+        if (paz[idx] > 360) or (paz[idx] < 180):
+            Least += temp_sky * Lsky_side[idx, 2] * math.cos((90 - paz[idx]) * rad)
+            Least += vegetation_surface * ster[idx] * cos_alt[idx] * temp_vegsh * math.cos((90 - paz[idx]) * rad)
+        if (paz[idx] > 90) and (paz[idx] < 270):
+            Lsouth += temp_sky * Lsky_side[idx, 2] * math.cos((180 - paz[idx]) * rad)
+            Lsouth += vegetation_surface * ster[idx] * cos_alt[idx] * temp_vegsh * math.cos((180 - paz[idx]) * rad)
+        if (paz[idx] > 180) and (paz[idx] < 360):
+            Lwest += temp_sky * Lsky_side[idx, 2] * math.cos((270 - paz[idx]) * rad)
+            Lwest += vegetation_surface * ster[idx] * cos_alt[idx] * temp_vegsh * math.cos((270 - paz[idx]) * rad)
+        if (paz[idx] > 270) or (paz[idx] < 90):
+            Lnorth += temp_sky * Lsky_side[idx, 2] * math.cos((0 - paz[idx]) * rad)
+            Lnorth += vegetation_surface * ster[idx] * cos_alt[idx] * temp_vegsh * math.cos((0 - paz[idx]) * rad)
 
         # Calculations for patches that are buildings, shmat = 0 = shade from buildings
         temp_vbsh = (1 - shmat[:, :, idx]) * vbshvegshmat[:, :, idx]
         temp_sh = (temp_vbsh == 1)
-        azimuth_difference = torch.abs(solar_azimuth - patch_azimuth[idx])
+        azimuth_difference = abs(sun_azimuth - paz[idx])
 
         # Longwave radiation from sunlit surfaces
-        sunlit_surface = ((ewall * SBC * ((Ta + Tgwall + 273.15) ** 4)) / as_tensor(np.pi, device=device))
+        sunlit_surface = ((ewall * SBC * ((Ta + Tgwall + 273.15) ** 4)) / math.pi)
         # Longwave radiation from shaded surfaces
-        shaded_surface = ((ewall * SBC * ((Ta + 273.15) ** 4)) / as_tensor(np.pi, device=device))
-        if ((azimuth_difference > 90) and (azimuth_difference < 270) and (solar_altitude > 0)):
+        shaded_surface = ((ewall * SBC * ((Ta + 273.15) ** 4)) / math.pi)
+        if ((azimuth_difference > 90) and (azimuth_difference < 270) and sun_up):
             # Calculate which patches defined as buildings that are sunlit or shaded
             sunlit_patches, shaded_patches = shaded_or_sunlit(solar_altitude, solar_azimuth, patch_altitude[idx], patch_azimuth[idx], asvf)
 
             # Calculate longwave radiation from sunlit walls to vertical surface
-            Lside_sun += sunlit_surface * sunlit_patches * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_sh
+            Lside_sun += sunlit_surface * sunlit_patches * ster[idx] * cos_alt[idx] * temp_sh
             # Calculate longwave radiation from shaded walls to vertical surface
-            Lside_sh += shaded_surface * shaded_patches * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_sh
+            Lside_sh += shaded_surface * shaded_patches * ster[idx] * cos_alt[idx] * temp_sh
 
             # Calculate longwave radiation from sunlit walls to horizontal surface
-            Ldown_sun += sunlit_surface * sunlit_patches * steradian[idx] * torch.sin(patch_altitude[idx] * deg2rad) * temp_sh
+            Ldown_sun += sunlit_surface * sunlit_patches * ster[idx] * sin_alt[idx] * temp_sh
             # Calculate longwave radiation from shaded walls to horizontal surface
-            Ldown_sh += shaded_surface * shaded_patches * steradian[idx] * torch.sin(patch_altitude[idx] * deg2rad) * temp_sh
+            Ldown_sh += shaded_surface * shaded_patches * ster[idx] * sin_alt[idx] * temp_sh
 
             # Portion into cardinal directions to be used for standing box or POI output
-            if (patch_azimuth[idx] > 360) or (patch_azimuth[idx] < 180):
-                Least += sunlit_surface * sunlit_patches * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_sh * torch.cos((90 - patch_azimuth[idx]) * deg2rad)
-                Least += shaded_surface * shaded_patches * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_sh * torch.cos((90 - patch_azimuth[idx]) * deg2rad)
-            if (patch_azimuth[idx] > 90) and (patch_azimuth[idx] < 270):
-                Lsouth += sunlit_surface * sunlit_patches * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_sh * torch.cos((180 - patch_azimuth[idx]) * deg2rad)
-                Lsouth += shaded_surface * shaded_patches * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_sh * torch.cos((180 - patch_azimuth[idx]) * deg2rad)
-            if (patch_azimuth[idx] > 180) and (patch_azimuth[idx] < 360):
-                Lwest += sunlit_surface * sunlit_patches * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_sh * torch.cos((270 - patch_azimuth[idx]) * deg2rad)
-                Lwest += shaded_surface * shaded_patches * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_sh * torch.cos((270 - patch_azimuth[idx]) * deg2rad)
-            if (patch_azimuth[idx] > 270) or (patch_azimuth[idx] < 90):
-                Lnorth += sunlit_surface * sunlit_patches * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_sh * torch.cos((0 - patch_azimuth[idx]) * deg2rad)
-                Lnorth += shaded_surface * shaded_patches * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_sh * torch.cos((0 - patch_azimuth[idx]) * deg2rad)
+            if (paz[idx] > 360) or (paz[idx] < 180):
+                Least += sunlit_surface * sunlit_patches * ster[idx] * cos_alt[idx] * temp_sh * math.cos((90 - paz[idx]) * rad)
+                Least += shaded_surface * shaded_patches * ster[idx] * cos_alt[idx] * temp_sh * math.cos((90 - paz[idx]) * rad)
+            if (paz[idx] > 90) and (paz[idx] < 270):
+                Lsouth += sunlit_surface * sunlit_patches * ster[idx] * cos_alt[idx] * temp_sh * math.cos((180 - paz[idx]) * rad)
+                Lsouth += shaded_surface * shaded_patches * ster[idx] * cos_alt[idx] * temp_sh * math.cos((180 - paz[idx]) * rad)
+            if (paz[idx] > 180) and (paz[idx] < 360):
+                Lwest += sunlit_surface * sunlit_patches * ster[idx] * cos_alt[idx] * temp_sh * math.cos((270 - paz[idx]) * rad)
+                Lwest += shaded_surface * shaded_patches * ster[idx] * cos_alt[idx] * temp_sh * math.cos((270 - paz[idx]) * rad)
+            if (paz[idx] > 270) or (paz[idx] < 90):
+                Lnorth += sunlit_surface * sunlit_patches * ster[idx] * cos_alt[idx] * temp_sh * math.cos((0 - paz[idx]) * rad)
+                Lnorth += shaded_surface * shaded_patches * ster[idx] * cos_alt[idx] * temp_sh * math.cos((0 - paz[idx]) * rad)
 
         else:
             # Calculate longwave radiation from shaded walls reaching a vertical surface
-            Lside_sh += shaded_surface * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_sh
+            Lside_sh += shaded_surface * ster[idx] * cos_alt[idx] * temp_sh
 
             # Calculate longwave radiation from shaded walls reaching a horizontal surface
-            Ldown_sh += shaded_surface * steradian[idx] * torch.sin(patch_altitude[idx] * deg2rad) * temp_sh
+            Ldown_sh += shaded_surface * ster[idx] * sin_alt[idx] * temp_sh
 
             # Portion into cardinal directions to be used for standing box or POI output
-            if (patch_azimuth[idx] > 360) or (patch_azimuth[idx] < 180):
-                Least += shaded_surface * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_sh * torch.cos((90 - patch_azimuth[idx]) * deg2rad)
-            if (patch_azimuth[idx] > 90) and (patch_azimuth[idx] < 270):
-                Lsouth += shaded_surface * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_sh * torch.cos((180 - patch_azimuth[idx]) * deg2rad)
-            if (patch_azimuth[idx] > 180) and (patch_azimuth[idx] < 360):
-                Lwest += shaded_surface * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_sh * torch.cos((270 - patch_azimuth[idx]) * deg2rad)
-            if (patch_azimuth[idx] > 270) or (patch_azimuth[idx] < 90):
-                Lnorth += shaded_surface * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_sh * torch.cos((0 - patch_azimuth[idx]) * deg2rad)
+            if (paz[idx] > 360) or (paz[idx] < 180):
+                Least += shaded_surface * ster[idx] * cos_alt[idx] * temp_sh * math.cos((90 - paz[idx]) * rad)
+            if (paz[idx] > 90) and (paz[idx] < 270):
+                Lsouth += shaded_surface * ster[idx] * cos_alt[idx] * temp_sh * math.cos((180 - paz[idx]) * rad)
+            if (paz[idx] > 180) and (paz[idx] < 360):
+                Lwest += shaded_surface * ster[idx] * cos_alt[idx] * temp_sh * math.cos((270 - paz[idx]) * rad)
+            if (paz[idx] > 270) or (paz[idx] < 90):
+                Lnorth += shaded_surface * ster[idx] * cos_alt[idx] * temp_sh * math.cos((0 - paz[idx]) * rad)
 
     # Calculate reflected longwave in each patch
-    reflected_on_surfaces = (((Ldown_sky + Lup) * (1 - ewall) * 0.5) / as_tensor(np.pi, device=device))
+    reflected_on_surfaces = (((Ldown_sky + Lup) * (1 - ewall) * 0.5) / math.pi)
     for idx in range(patch_altitude.shape[0]):
         temp_sh = ((shmat[:, :, idx] == 0) | (vegshmat[:, :, idx] == 0) | (vbshvegshmat[:, :, idx] == 0))
 
         # Reflected longwave radiation reaching vertical surfaces
-        Lside_ref += reflected_on_surfaces * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_sh
+        Lside_ref += reflected_on_surfaces * ster[idx] * cos_alt[idx] * temp_sh
 
         # Reflected longwave radiation reaching horizontal surfaces
-        Ldown_ref += reflected_on_surfaces * steradian[idx] * torch.sin(patch_altitude[idx] * deg2rad) * temp_sh
+        Ldown_ref += reflected_on_surfaces * ster[idx] * sin_alt[idx] * temp_sh
 
         # Portion into cardinal directions to be used for standing box or POI output
-        if (patch_azimuth[idx] > 360) or (patch_azimuth[idx] < 180):
-            Least += reflected_on_surfaces * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_sh * torch.cos((90 - patch_azimuth[idx]) * deg2rad)
-        if (patch_azimuth[idx] > 90) and (patch_azimuth[idx] < 270):
-            Lsouth += reflected_on_surfaces * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_sh * torch.cos((180 - patch_azimuth[idx]) * deg2rad)
-        if (patch_azimuth[idx] > 180) and (patch_azimuth[idx] < 360):
-            Lwest += reflected_on_surfaces * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_sh * torch.cos((270 - patch_azimuth[idx]) * deg2rad)
-        if (patch_azimuth[idx] > 270) or (patch_azimuth[idx] < 90):
-            Lnorth += reflected_on_surfaces * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_sh * torch.cos((0 - patch_azimuth[idx]) * deg2rad)
+        if (paz[idx] > 360) or (paz[idx] < 180):
+            Least += reflected_on_surfaces * ster[idx] * cos_alt[idx] * temp_sh * math.cos((90 - paz[idx]) * rad)
+        if (paz[idx] > 90) and (paz[idx] < 270):
+            Lsouth += reflected_on_surfaces * ster[idx] * cos_alt[idx] * temp_sh * math.cos((180 - paz[idx]) * rad)
+        if (paz[idx] > 180) and (paz[idx] < 360):
+            Lwest += reflected_on_surfaces * ster[idx] * cos_alt[idx] * temp_sh * math.cos((270 - paz[idx]) * rad)
+        if (paz[idx] > 270) or (paz[idx] < 90):
+            Lnorth += reflected_on_surfaces * ster[idx] * cos_alt[idx] * temp_sh * math.cos((0 - paz[idx]) * rad)
 
     # Sum of all Lside components (sky, vegetation, sunlit and shaded buildings, reflected)
     Lside = Lside_sky + Lside_veg + Lside_sh + Lside_sun + Lside_ref

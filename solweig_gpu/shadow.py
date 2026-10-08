@@ -192,74 +192,65 @@ def shadow(amaxvalue, a, vegdem, vegdem2, bush, azimuth, altitude, scale):
         - Implements anisotropic shadow casting
         - Accounts for vegetation transmittance
     """
-    device = get_device()
-    degrees = torch.pi / 180.
+    # Loop bookkeeping (offsets, heights, loop tests) is done with plain Python
+    # numbers. Keeping it in device tensors forces a host/device sync on every
+    # step, which made this function slower on Apple MPS than on the CPU.
+    degrees = math.pi / 180.
+    azimuth = float(azimuth)
+    altitude = float(altitude)
     if azimuth == 0.0:
         azimuth = 1e-12
-    azimuth = ensure_tensor(azimuth)
-    altitude = ensure_tensor(altitude)
-    azimuth = azimuth * degrees #as_tensor(azimuth * degrees, device=a.device)
-    altitude = altitude * degrees #as_tensor(altitude * degrees, device=a.device)
-
-    dx = 0.
-    dy = 0.
-    dz = 0.
+    azimuth = azimuth * degrees
+    altitude = altitude * degrees
     sizex = a.shape[0]
     sizey = a.shape[1]
-
     device = a.device
-
-    dx = as_tensor(dx, device=device)
-    dy = as_tensor(dy, device=device)
-    dz = as_tensor(dz, device=device)
-
+    # A cell can only be shaded by something at most (highest surface - lowest
+    # surface) above it, so the height range is enough to stop the ray.
+    amaxvalue = float(amaxvalue) - float(a.min())
     temp = torch.zeros((sizex, sizey), device=device)
     tempvegdem = torch.zeros((sizex, sizey), device=device)
     tempvegdem2 = torch.zeros((sizex, sizey), device=device)
     sh = torch.zeros((sizex, sizey), device=device)
     vbshvegsh = torch.zeros((sizex, sizey), device=device)
     tempbush = torch.zeros((sizex, sizey), device=device)
-
     f = a.clone()
     g = torch.zeros((sizex, sizey), device=device)
     bushplant = (bush > 1.).float()
+    has_bush = bool(bush.max() > 0.)
     vegsh = torch.zeros((sizex, sizey), device=device) + bushplant
-
-    pibyfour = torch.pi / 4.
+    pibyfour = math.pi / 4.
     threetimespibyfour = 3. * pibyfour
     fivetimespibyfour = 5. * pibyfour
     seventimespibyfour = 7. * pibyfour
-    sinazimuth = torch.sin(azimuth)
-    cosazimuth = torch.cos(azimuth)
-    tanazimuth = torch.tan(azimuth)
-    signsinazimuth = torch.sign(sinazimuth)
-    signcosazimuth = torch.sign(cosazimuth)
-    dssin = torch.abs((1. / sinazimuth))
-    dscos = torch.abs((1. / cosazimuth))
-    tanaltitudebyscale = torch.tan(altitude) / scale
-
+    sinazimuth = math.sin(azimuth)
+    cosazimuth = math.cos(azimuth)
+    tanazimuth = math.tan(azimuth)
+    signsinazimuth = math.copysign(1., sinazimuth) if sinazimuth != 0 else 0.
+    signcosazimuth = math.copysign(1., cosazimuth) if cosazimuth != 0 else 0.
+    dssin = abs(1. / sinazimuth)
+    dscos = abs(1. / cosazimuth)
+    tanaltitudebyscale = math.tan(altitude) / scale
     index = 1
+    dx = dy = dz = 0.
     fabovea = None
     gabovea = None
     vegsh2 = None
-
-    while (amaxvalue >= dz and torch.abs(dx) < sizex and torch.abs(dy) < sizey):
+    while (amaxvalue >= dz and abs(dx) < sizex and abs(dy) < sizey):
         if (pibyfour <= azimuth < threetimespibyfour or fivetimespibyfour <= azimuth < seventimespibyfour):
             dy = signsinazimuth * index
-            dx = -1. * signcosazimuth * torch.abs(torch.round(index / tanazimuth))
+            dx = -1. * signcosazimuth * abs(round(index / tanazimuth))
             ds = dssin
         else:
-            dy = signsinazimuth * torch.abs(torch.round(index * tanazimuth))
+            dy = signsinazimuth * abs(round(index * tanazimuth))
             dx = -1. * signcosazimuth * index
             ds = dscos
-
         dz = ds * index * tanaltitudebyscale
-
         tempvegdem.zero_()
         tempvegdem2.zero_()
         temp.zero_()
-        absdx = torch.abs(dx)
-        absdy = torch.abs(dy)
+        absdx = abs(dx)
+        absdy = abs(dy)
         xc1 = int((dx + absdx) / 2.)
         xc2 = int(sizex + (dx - absdx) / 2.)
         yc1 = int((dy + absdy) / 2.)
@@ -274,32 +265,28 @@ def shadow(amaxvalue, a, vegdem, vegdem2, bush, azimuth, altitude, scale):
         temp[xp1:xp2, yp1:yp2] = a[xc1:xc2, yc1:yc2] - dz
 
         f = torch.max(f, temp)
-        sh[f > a] = 1.
-        sh[f <= a] = 0.
-
+        sh = (f > a).float()
         fabovea = tempvegdem > a
         gabovea = tempvegdem2 > a
         vegsh2 = fabovea.float() - gabovea.float()
-
         vegsh = torch.max(vegsh, vegsh2)
-        vegsh[(vegsh * sh > 0.)] = 0.
-
+        vegsh.masked_fill_(vegsh * sh > 0., 0.)
         vbshvegsh = vegsh + vbshvegsh
 
-        if index == 1.:
+        if index == 1:
             firstvegdem = tempvegdem - temp
-            firstvegdem[firstvegdem <= 0.] = 1000.
-            vegsh[firstvegdem < dz] = 1.
+            firstvegdem.masked_fill_(firstvegdem <= 0., 1000.)
+            vegsh.masked_fill_(firstvegdem < dz, 1.)
             vegsh = vegsh * (vegdem2 > a).float()
             vbshvegsh.zero_()
 
-        if bush.max() > 0. and torch.max(fabovea * bush) > 0.:
+        if has_bush and torch.max(fabovea * bush) > 0.:
             tempbush.zero_()
             tempbush[int(xp1):int(xp2), int(yp1):int(yp2)] = bush[int(xc1):int(xc2), int(yc1):int(yc2)] - dz
             g = torch.max(g, tempbush)
             g *= bushplant
 
-        index += 1.
+        index += 1
 
     sh = 1. - sh
     vbshvegsh[vbshvegsh > 0.] = 1.
