@@ -192,51 +192,55 @@ def shadow(amaxvalue, a, vegdem, vegdem2, bush, azimuth, altitude, scale):
         - Implements anisotropic shadow casting
         - Accounts for vegetation transmittance
     """
+    # Vegetation shadows follow UMEP's current shadowingfunction_20: the ray
+    # also tests the previous step, so it cannot jump over a thin crown. The
+    # older scheme (vegsh2 = fabovea - gabovea) missed canopy and let too much
+    # sky through in the 153 SVF patches. Same algorithm as
+    # shadowingfunction_wallheight_23, which already had it.
+    #
     # Loop bookkeeping (offsets, heights, loop tests) is done with plain Python
     # numbers. Keeping it in device tensors forces a host/device sync on every
     # step, which made this function slower on Apple MPS than on the CPU.
+    # numpy trig on Python floats matches UMEP to the last bit, which matters
+    # where index * tan(azimuth) falls on a .5 rounding boundary. Python floats are double precision, so tan(90 degrees) is huge and the
+    # zenith patch casts no horizontal shadows.
     degrees = math.pi / 180.
-    azimuth = float(azimuth)
-    altitude = float(altitude)
-    if azimuth == 0.0:
-        azimuth = 1e-12
-    azimuth = azimuth * degrees
-    altitude = altitude * degrees
+    azimuth = float(azimuth) * degrees
+    altitude = float(altitude) * degrees
     sizex = a.shape[0]
     sizey = a.shape[1]
     device = a.device
     # A cell can only be shaded by something at most (highest surface - lowest
-    # surface) above it, so the height range is enough to stop the ray.
-    amaxvalue = float(amaxvalue) - float(a.min())
+    # surface) above it. The loop runs one step past that, because a crown is
+    # also detected on the step after the ray leaves it.
+    amaxvalue = max(float(amaxvalue), float(a.max()), float(vegdem.max())) - float(a.min())
     temp = torch.zeros((sizex, sizey), device=device)
     tempvegdem = torch.zeros((sizex, sizey), device=device)
     tempvegdem2 = torch.zeros((sizex, sizey), device=device)
+    templastfabovea = torch.zeros((sizex, sizey), device=device)
+    templastgabovea = torch.zeros((sizex, sizey), device=device)
     sh = torch.zeros((sizex, sizey), device=device)
     vbshvegsh = torch.zeros((sizex, sizey), device=device)
-    tempbush = torch.zeros((sizex, sizey), device=device)
     f = a.clone()
-    g = torch.zeros((sizex, sizey), device=device)
     bushplant = (bush > 1.).float()
-    has_bush = bool(bush.max() > 0.)
     vegsh = torch.zeros((sizex, sizey), device=device) + bushplant
     pibyfour = math.pi / 4.
     threetimespibyfour = 3. * pibyfour
     fivetimespibyfour = 5. * pibyfour
     seventimespibyfour = 7. * pibyfour
-    sinazimuth = math.sin(azimuth)
-    cosazimuth = math.cos(azimuth)
-    tanazimuth = math.tan(azimuth)
+    sinazimuth = float(np.sin(azimuth))
+    cosazimuth = float(np.cos(azimuth))
+    tanazimuth = float(np.tan(azimuth))
     signsinazimuth = math.copysign(1., sinazimuth) if sinazimuth != 0 else 0.
     signcosazimuth = math.copysign(1., cosazimuth) if cosazimuth != 0 else 0.
-    dssin = abs(1. / sinazimuth)
-    dscos = abs(1. / cosazimuth)
-    tanaltitudebyscale = math.tan(altitude) / scale
-    index = 1
+    dssin = abs(1. / sinazimuth) if sinazimuth != 0 else math.inf
+    dscos = abs(1. / cosazimuth) if cosazimuth != 0 else math.inf
+    tanaltitudebyscale = float(np.tan(altitude)) / scale
+    index = 0
     dx = dy = dz = 0.
-    fabovea = None
-    gabovea = None
-    vegsh2 = None
-    while (amaxvalue >= dz and abs(dx) < sizex and abs(dy) < sizey):
+    dzprev = 0.
+    fabovea = gabovea = vegsh2 = None
+    while (amaxvalue >= dzprev and abs(dx) < sizex and abs(dy) < sizey):
         if (pibyfour <= azimuth < threetimespibyfour or fivetimespibyfour <= azimuth < seventimespibyfour):
             dy = signsinazimuth * index
             dx = -1. * signcosazimuth * abs(round(index / tanazimuth))
@@ -249,6 +253,8 @@ def shadow(amaxvalue, a, vegdem, vegdem2, bush, azimuth, altitude, scale):
         tempvegdem.zero_()
         tempvegdem2.zero_()
         temp.zero_()
+        templastfabovea.zero_()
+        templastgabovea.zero_()
         absdx = abs(dx)
         absdy = abs(dy)
         xc1 = int((dx + absdx) / 2.)
@@ -264,47 +270,32 @@ def shadow(amaxvalue, a, vegdem, vegdem2, bush, azimuth, altitude, scale):
         tempvegdem2[xp1:xp2, yp1:yp2] = vegdem2[xc1:xc2, yc1:yc2] - dz
         temp[xp1:xp2, yp1:yp2] = a[xc1:xc2, yc1:yc2] - dz
 
-        f = torch.max(f, temp)
+        f = torch.max(f, temp)  # moving building shadow
         sh = (f > a).float()
-        fabovea = tempvegdem > a
-        gabovea = tempvegdem2 > a
-        vegsh2 = fabovea.float() - gabovea.float()
+        fabovea = (tempvegdem > a).float()  # vegdem above DSM
+        gabovea = (tempvegdem2 > a).float()  # vegdem2 above DSM
+        templastfabovea[xp1:xp2, yp1:yp2] = vegdem[xc1:xc2, yc1:yc2] - dzprev
+        templastgabovea[xp1:xp2, yp1:yp2] = vegdem2[xc1:xc2, yc1:yc2] - dzprev
+        lastfabovea = (templastfabovea > a).float()
+        lastgabovea = (templastgabovea > a).float()
+        dzprev = dz
+        vegsh2 = fabovea + gabovea + lastfabovea + lastgabovea
+        vegsh2 = vegsh2.masked_fill(vegsh2 == 4, 0.)
+        vegsh2 = vegsh2.masked_fill(vegsh2 > 0, 1.)
         vegsh = torch.max(vegsh, vegsh2)
         vegsh.masked_fill_(vegsh * sh > 0., 0.)
-        vbshvegsh = vegsh + vbshvegsh
-
-        if index == 1:
-            firstvegdem = tempvegdem - temp
-            firstvegdem.masked_fill_(firstvegdem <= 0., 1000.)
-            vegsh.masked_fill_(firstvegdem < dz, 1.)
-            vegsh = vegsh * (vegdem2 > a).float()
-            vbshvegsh.zero_()
-
-        if has_bush and torch.max(fabovea * bush) > 0.:
-            tempbush.zero_()
-            tempbush[int(xp1):int(xp2), int(yp1):int(yp2)] = bush[int(xc1):int(xc2), int(yc1):int(yc2)] - dz
-            g = torch.max(g, tempbush)
-            g *= bushplant
+        vbshvegsh = vegsh + vbshvegsh  # removing shadows 'behind' buildings
 
         index += 1
 
     sh = 1. - sh
-    vbshvegsh[vbshvegsh > 0.] = 1.
+    vbshvegsh.masked_fill_(vbshvegsh > 0., 1.)
     vbshvegsh = vbshvegsh - vegsh
-
-    if bush.max() > 0.:
-        g = g - bush
-        g[g > 0.] = 1.
-        g[g < 0.] = 0.
-        vegsh = vegsh - bushplant + g
-        vegsh[vegsh < 0.] = 0.
-
-    vegsh[vegsh > 0.] = 1.
     vegsh = 1. - vegsh
     vbshvegsh = 1. - vbshvegsh
 
     # Changed here
-    del tempvegdem, tempvegdem2, temp, tempbush, fabovea, gabovea, vegsh2
+    del tempvegdem, tempvegdem2, temp, fabovea, gabovea, vegsh2
     empty_cache()
     # Changed here
     return sh, vegsh, vbshvegsh
@@ -521,7 +512,10 @@ def svf_calculator(patch_option, amaxvalue=None, a=None, vegdem=None, vegdem2=No
 
     index = 0
     for j in range(skyvaultaltint.shape[0]):
-        for k in range(int(360 / skyvaultaziint[j])):
+        # The patch count comes from aziinterval itself. int(360 / skyvaultaziint[j])
+        # truncates in float32 (360 / 12.0 gives 29.999998 -> 29), which dropped four
+        # patches and paired every later patch with the wrong azimuth.
+        for k in range(int(aziinterval[j])):
             iazimuth[0, index] = k * skyvaultaziint[j] + azistart[j]
             if iazimuth[0, index] > 360.:
                 iazimuth[0, index] = iazimuth[0, index] - 360.

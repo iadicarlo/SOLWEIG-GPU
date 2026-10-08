@@ -161,9 +161,9 @@ def sunonsurface_2018a(azimuthA, scale, buildings, shadow, sunwall, first, secon
     threetimespibyfour = 3 * pibyfour
     fivetimespibyfour = 5 * pibyfour
     seventimespibyfour = 7 * pibyfour
-    sinazimuth = math.sin(azimuth)
-    cosazimuth = math.cos(azimuth)
-    tanazimuth = math.tan(azimuth)
+    sinazimuth = float(np.sin(azimuth))
+    cosazimuth = float(np.cos(azimuth))
+    tanazimuth = float(np.tan(azimuth))
     signsinazimuth = math.copysign(1., sinazimuth) if sinazimuth != 0 else 0.
     signcosazimuth = math.copysign(1., cosazimuth) if cosazimuth != 0 else 0.
 
@@ -1076,8 +1076,9 @@ def shadowingfunction_wallheight_23(a, vegdem, vegdem2, azimuth, altitude, scale
     altitude = float(altitude) * degrees
     sizex, sizey = a.shape
     # A cell can only be shaded by something at most (highest surface - lowest
-    # surface) above it, so the height range is enough to stop the ray.
-    amaxvalue = float(amaxvalue) - float(a.min())
+    # surface) above it. The loop runs one step past that, because a crown is
+    # also detected on the step after the ray leaves it.
+    amaxvalue = max(float(amaxvalue), float(a.max()), float(vegdem.max())) - float(a.min())
     dx = dy = dz = 0.0
     temp = torch.zeros((sizex, sizey), device=device)
     tempvegdem = torch.zeros((sizex, sizey), device=device)
@@ -1095,14 +1096,14 @@ def shadowingfunction_wallheight_23(a, vegdem, vegdem2, azimuth, altitude, scale
     threetimespibyfour = 3 * pibyfour
     fivetimespibyfour = 5 * pibyfour
     seventimespibyfour = 7 * pibyfour
-    sinazimuth = math.sin(azimuth)
-    cosazimuth = math.cos(azimuth)
-    tanazimuth = math.tan(azimuth)
+    sinazimuth = float(np.sin(azimuth))
+    cosazimuth = float(np.cos(azimuth))
+    tanazimuth = float(np.tan(azimuth))
     signsinazimuth = math.copysign(1., sinazimuth) if sinazimuth != 0 else 0.
     signcosazimuth = math.copysign(1., cosazimuth) if cosazimuth != 0 else 0.
     dssin = abs(1 / sinazimuth) if sinazimuth != 0 else math.inf
     dscos = abs(1 / cosazimuth) if cosazimuth != 0 else math.inf
-    tanaltitudebyscale = math.tan(altitude) / scale
+    tanaltitudebyscale = float(np.tan(altitude)) / scale
     index = 0
     dzprev = 0.0
     fabovea = None
@@ -1110,7 +1111,7 @@ def shadowingfunction_wallheight_23(a, vegdem, vegdem2, azimuth, altitude, scale
     lastfabovea = None
     lastgabovea = None
     vegsh2 = None
-    while (amaxvalue >= dz) and (abs(dx) < sizex) and (abs(dy) < sizey):
+    while (amaxvalue >= dzprev) and (abs(dx) < sizex) and (abs(dy) < sizey):
         if ((pibyfour <= azimuth) and (azimuth < threetimespibyfour)) or ((fivetimespibyfour <= azimuth) and (azimuth < seventimespibyfour)):
             dy = signsinazimuth * index
             dx = -1 * signcosazimuth * abs(round(index / tanazimuth))
