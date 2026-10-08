@@ -22,6 +22,7 @@ import datetime
 import calendar
 import scipy.ndimage.interpolation as sc
 import torch
+from .device import get_device, empty_cache, as_tensor
 import torch.nn.functional as F
 from scipy.ndimage import rotate
 import time
@@ -41,7 +42,7 @@ import zipfile
 from .walls_aspect import run_parallel_processing
 gdal.UseExceptions()
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = get_device()
 
 script_dir = os.path.dirname(__file__)
 landcover_classes_path = os.path.join(script_dir, 'landcoverclasses_2016a.txt')
@@ -83,7 +84,7 @@ def load_raster_to_tensor(dem_path):
     dataset = gdal.Open(dem_path)
     band = dataset.GetRasterBand(1)
     array = band.ReadAsArray().astype(np.float32)
-    return torch.tensor(array, device=device), dataset
+    return as_tensor(array, device=device), dataset
 
 def extract_key(filename, is_metfile=False):
     """
@@ -259,7 +260,7 @@ def _load_raster_to_tensor_from_path(raster_path: str):
     arr = ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
     ds = None
 
-    return torch.tensor(arr, device=device)
+    return as_tensor(arr, device=device)
 
 
 def _load_raster_to_tensor_from_zip(zip_path: str, internal_tif_name: str):
@@ -277,7 +278,7 @@ def _load_raster_to_tensor_from_zip(zip_path: str, internal_tif_name: str):
     arr = ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
     ds = None
 
-    return torch.tensor(arr, device=device)
+    return as_tensor(arr, device=device)
 
 
 def load_cached_svf_outputs(building_dsm_path: str, number: str):
@@ -315,9 +316,9 @@ def load_cached_svf_outputs(building_dsm_path: str, number: str):
     svftotal = _load_raster_to_tensor_from_path(svftotal_path)
 
     with np.load(npz_path) as npz:
-        shmat = torch.tensor(npz["shadowmat"].astype(np.float32), device=device)
-        vegshmat = torch.tensor(npz["vegshadowmat"].astype(np.float32), device=device)
-        vbshvegshmat = torch.tensor(npz["vbshmat"].astype(np.float32), device=device)
+        shmat = as_tensor(npz["shadowmat"].astype(np.float32), device=device)
+        vegshmat = as_tensor(npz["vegshadowmat"].astype(np.float32), device=device)
+        vbshvegshmat = as_tensor(npz["vbshmat"].astype(np.float32), device=device)
 
     return (
         svf, svfaveg, svfE, svfEaveg, svfEveg, svfN, svfNaveg, svfNveg, svfS, svfSaveg, svfSveg, svfveg,
@@ -523,14 +524,14 @@ def compute_utci(building_dsm_path, tree_path, dem_path, walls_path, aspect_path
         (TgK_np, Tstart_np, alb_np, emis_np, TgK_wall_np, Tstart_wall_np, TmaxLST_np,
          TmaxLST_wall_np) = Tgmaps_v1(lcgrid_np, lc_class)
            
-        TgK           = torch.from_numpy(TgK_np).to(device).float()
-        Tstart        = torch.from_numpy(Tstart_np).to(device).float()
-        alb_grid      = torch.from_numpy(alb_np).to(device).float()
-        emis_grid     = torch.from_numpy(emis_np).to(device).float()
-        TgK_wall = torch.as_tensor(TgK_wall_np, device=device).float()
-        Tstart_wall = torch.as_tensor(Tstart_wall_np, device=device).float()
-        TmaxLST = torch.as_tensor(TmaxLST_np, device=device).float()
-        TmaxLST_wall = torch.as_tensor(TmaxLST_wall_np, device=device).float()
+        TgK           = torch.from_numpy(TgK_np).float().to(device)
+        Tstart        = torch.from_numpy(Tstart_np).float().to(device)
+        alb_grid      = torch.from_numpy(alb_np).float().to(device)
+        emis_grid     = torch.from_numpy(emis_np).float().to(device)
+        TgK_wall = torch.as_tensor(TgK_wall_np, dtype=torch.float32, device=device)
+        Tstart_wall = torch.as_tensor(Tstart_wall_np, dtype=torch.float32, device=device)
+        TmaxLST = torch.as_tensor(TmaxLST_np, dtype=torch.float32, device=device)
+        TmaxLST_wall = torch.as_tensor(TmaxLST_wall_np, dtype=torch.float32, device=device)
     else:
         TgK = Knight + 0.37
         Tstart = Knight - 3.41
@@ -550,24 +551,24 @@ def compute_utci(building_dsm_path, tree_path, dem_path, walls_path, aspect_path
         lcgrid = False
     anisotropic_sky = 1
     patch_option = 2
-    DOY = torch.tensor(met_file[:, 1], device=device)
-    hours = torch.tensor(met_file[:, 2], device=device)
-    minu = torch.tensor(met_file[:, 3], device=device)
-    Ta = torch.tensor(met_file[:, 11], device=device)
-    RH = torch.tensor(met_file[:, 10], device=device)
-    radG = torch.tensor(met_file[:, 14], device=device)
-    radD = torch.tensor(met_file[:, 21], device=device)
-    radI = torch.tensor(met_file[:, 22], device=device)
-    P = torch.tensor(met_file[:, 12], device=device)
-    Ws = torch.tensor(met_file[:, 9], device=device)
+    DOY = as_tensor(met_file[:, 1], device=device)
+    hours = as_tensor(met_file[:, 2], device=device)
+    minu = as_tensor(met_file[:, 3], device=device)
+    Ta = as_tensor(met_file[:, 11], device=device)
+    RH = as_tensor(met_file[:, 10], device=device)
+    radG = as_tensor(met_file[:, 14], device=device)
+    radD = as_tensor(met_file[:, 21], device=device)
+    radI = as_tensor(met_file[:, 22], device=device)
+    P = as_tensor(met_file[:, 12], device=device)
+    Ws = as_tensor(met_file[:, 9], device=device)
 
     if met_file.shape[1] > 23:
-        Wdirection = torch.tensor(met_file[:, 23], device=device)
+        Wdirection = as_tensor(met_file[:, 23], device=device)
     else:
         Wdirection = torch.full((met_file.shape[0],), -999.0, device=device)
 
     if met_file.shape[1] > 24:
-        uhii = torch.tensor(met_file[:, 24], device=device)
+        uhii = as_tensor(met_file[:, 24], device=device)
     else:
         uhii = torch.zeros(met_file.shape[0], device=device)
 
@@ -577,7 +578,7 @@ def compute_utci(building_dsm_path, tree_path, dem_path, walls_path, aspect_path
         P_np = P.cpu().numpy()
     
         wbt_np = isobaric_wet_bulb_temperature_from_rh(p=P_np * 1000.0, T=Ta_np + 273.15, rh=RH_np, phase='liquid', method='Romps',limit=True)
-        wbt = torch.tensor(wbt_np, device=device, dtype=Ta.dtype)
+        wbt = as_tensor(wbt_np, device=device, dtype=Ta.dtype)
     # Prepare leafon based on vegetation type
     if conifer_bool:
         leafon = torch.ones((1, DOY.shape[0]), device=device)
@@ -592,11 +593,11 @@ def compute_utci(building_dsm_path, tree_path, dem_path, walls_path, aspect_path
     psi[leafon == 0] = 0.5
     Twater = []
     height = 1.1
-    height = torch.tensor(height, device=device)
-    #first = torch.round(torch.tensor(height, device=device))
+    height = as_tensor(height, device=device)
+    #first = torch.round(as_tensor(height, device=device))
     first = torch.round(height.clone().detach().to(device))
     if first == 0.:
-        first = torch.tensor(1., device=device)
+        first = as_tensor(1., device=device)
     second = torch.round(height * 20.)
     if len(Ta) == 1:
         timestepdec = 0

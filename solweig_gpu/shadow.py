@@ -22,6 +22,7 @@ import datetime
 import calendar
 import scipy.ndimage.interpolation as sc
 import torch
+from .device import get_device, empty_cache, as_tensor
 import torch.nn.functional as F
 from scipy.ndimage import rotate
 import time
@@ -30,7 +31,7 @@ import zipfile
 
 gdal.UseExceptions()
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = get_device()
 
 def load_raster_to_tensor(dem_path, device=device):
     dataset = gdal.Open(dem_path)
@@ -40,7 +41,7 @@ def load_raster_to_tensor(dem_path, device=device):
     band = dataset.GetRasterBand(1)
     array = band.ReadAsArray().astype(np.float32)
 
-    return torch.tensor(array, device=device), dataset
+    return as_tensor(array, device=device), dataset
 
 def ensure_tensor(x, device=None):
     """
@@ -54,9 +55,9 @@ def ensure_tensor(x, device=None):
         torch.Tensor: Input converted to tensor on specified device
     """
     if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = get_device()
     if not isinstance(x, torch.Tensor):
-        x = torch.tensor(x, device=device)
+        x = as_tensor(x, device=device)
     return x
 
 def tensor_to_numpy(x):
@@ -191,14 +192,14 @@ def shadow(amaxvalue, a, vegdem, vegdem2, bush, azimuth, altitude, scale):
         - Implements anisotropic shadow casting
         - Accounts for vegetation transmittance
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = get_device()
     degrees = torch.pi / 180.
     if azimuth == 0.0:
         azimuth = 1e-12
     azimuth = ensure_tensor(azimuth)
     altitude = ensure_tensor(altitude)
-    azimuth = azimuth * degrees #torch.tensor(azimuth * degrees, device=a.device)
-    altitude = altitude * degrees #torch.tensor(altitude * degrees, device=a.device)
+    azimuth = azimuth * degrees #as_tensor(azimuth * degrees, device=a.device)
+    altitude = altitude * degrees #as_tensor(altitude * degrees, device=a.device)
 
     dx = 0.
     dy = 0.
@@ -208,9 +209,9 @@ def shadow(amaxvalue, a, vegdem, vegdem2, bush, azimuth, altitude, scale):
 
     device = a.device
 
-    dx = torch.tensor(dx, device=device)
-    dy = torch.tensor(dy, device=device)
-    dz = torch.tensor(dz, device=device)
+    dx = as_tensor(dx, device=device)
+    dy = as_tensor(dy, device=device)
+    dz = as_tensor(dz, device=device)
 
     temp = torch.zeros((sizex, sizey), device=device)
     tempvegdem = torch.zeros((sizex, sizey), device=device)
@@ -317,7 +318,7 @@ def shadow(amaxvalue, a, vegdem, vegdem2, bush, azimuth, altitude, scale):
 
     # Changed here
     del tempvegdem, tempvegdem2, temp, tempbush, fabovea, gabovea, vegsh2
-    torch.cuda.empty_cache()
+    empty_cache()
     # Changed here
     return sh, vegsh, vbshvegsh
 
@@ -337,10 +338,10 @@ def annulus_weight(altitude, aziinterval, device=None):
         torch.Tensor: Array of annulus weights
     """
     if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = get_device()
     
-    n = torch.tensor(90.0, device=device)
-    altitude = torch.tensor(altitude, device=device)
+    n = as_tensor(90.0, device=device)
+    altitude = as_tensor(altitude, device=device)
 
     steprad = (360.0 / aziinterval) * (torch.pi / 180.0)
     annulus = 91.0 - altitude
@@ -370,38 +371,38 @@ def create_patches(patch_option):
     Raises:
         ValueError: If patch_option is not 144 or 2304
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = get_device()
     deg2rad = torch.pi / 180
-    skyvaultalt = torch.tensor([], device=device)
-    skyvaultazi = torch.tensor([], device=device)
+    skyvaultalt = as_tensor([], device=device)
+    skyvaultazi = as_tensor([], device=device)
 
     if patch_option == 1:
-        annulino = torch.tensor([0, 12, 24, 36, 48, 60, 72, 84, 90], device=device)
-        skyvaultaltint = torch.tensor([6, 18, 30, 42, 54, 66, 78, 90], device=device)
-        azistart = torch.tensor([0, 4, 2, 5, 8, 0, 10, 0], device=device)
-        patches_in_band = torch.tensor([30, 30, 24, 24, 18, 12, 6, 1], device=device)
+        annulino = as_tensor([0, 12, 24, 36, 48, 60, 72, 84, 90], device=device)
+        skyvaultaltint = as_tensor([6, 18, 30, 42, 54, 66, 78, 90], device=device)
+        azistart = as_tensor([0, 4, 2, 5, 8, 0, 10, 0], device=device)
+        patches_in_band = as_tensor([30, 30, 24, 24, 18, 12, 6, 1], device=device)
     elif patch_option == 2:
-        annulino = torch.tensor([0, 12, 24, 36, 48, 60, 72, 84, 90], device=device)
-        skyvaultaltint = torch.tensor([6, 18, 30, 42, 54, 66, 78, 90], device=device)
-        azistart = torch.tensor([0, 4, 2, 5, 8, 0, 10, 0], device=device)
-        patches_in_band = torch.tensor([31, 30, 28, 24, 19, 13, 7, 1], device=device)
+        annulino = as_tensor([0, 12, 24, 36, 48, 60, 72, 84, 90], device=device)
+        skyvaultaltint = as_tensor([6, 18, 30, 42, 54, 66, 78, 90], device=device)
+        azistart = as_tensor([0, 4, 2, 5, 8, 0, 10, 0], device=device)
+        patches_in_band = as_tensor([31, 30, 28, 24, 19, 13, 7, 1], device=device)
     elif patch_option == 3:
-        annulino = torch.tensor([0, 12, 24, 36, 48, 60, 72, 84, 90], device=device)
-        skyvaultaltint = torch.tensor([6, 18, 30, 42, 54, 66, 78, 90], device=device)
-        azistart = torch.tensor([0, 4, 2, 5, 8, 0, 10, 0], device=device)
-        patches_in_band = torch.tensor([31*2, 30*2, 28*2, 24*2, 19*2, 13*2, 7*2, 1], device=device)
+        annulino = as_tensor([0, 12, 24, 36, 48, 60, 72, 84, 90], device=device)
+        skyvaultaltint = as_tensor([6, 18, 30, 42, 54, 66, 78, 90], device=device)
+        azistart = as_tensor([0, 4, 2, 5, 8, 0, 10, 0], device=device)
+        patches_in_band = as_tensor([31*2, 30*2, 28*2, 24*2, 19*2, 13*2, 7*2, 1], device=device)
     elif patch_option == 4:
-        annulino = torch.tensor([0, 4.5, 9, 15, 21, 27, 33, 39, 45, 51, 57, 63, 69, 75, 81, 90], device=device)
-        skyvaultaltint = torch.tensor([3, 9, 15, 21, 27, 33, 39, 45, 51, 57, 63, 69, 75, 81, 90], device=device)
-        patches_in_band = torch.tensor([31*2, 31*2, 30*2, 30*2, 28*2, 28*2, 24*2, 24*2, 19*2, 19*2, 13*2, 13*2, 7*2, 7*2, 1], device=device)
-        azistart = torch.tensor([0, 0, 4, 4, 2, 2, 5, 5, 8, 8, 0, 0, 10, 10, 0], device=device)
+        annulino = as_tensor([0, 4.5, 9, 15, 21, 27, 33, 39, 45, 51, 57, 63, 69, 75, 81, 90], device=device)
+        skyvaultaltint = as_tensor([3, 9, 15, 21, 27, 33, 39, 45, 51, 57, 63, 69, 75, 81, 90], device=device)
+        patches_in_band = as_tensor([31*2, 31*2, 30*2, 30*2, 28*2, 28*2, 24*2, 24*2, 19*2, 19*2, 13*2, 13*2, 7*2, 7*2, 1], device=device)
+        azistart = as_tensor([0, 0, 4, 4, 2, 2, 5, 5, 8, 8, 0, 0, 10, 10, 0], device=device)
 
     skyvaultaziint = 360 / patches_in_band
 
     for j in range(skyvaultaltint.shape[0]):
         for k in range(patches_in_band[j]):
-            skyvaultalt = torch.cat((skyvaultalt, torch.tensor([skyvaultaltint[j]], device=device)))
-            skyvaultazi = torch.cat((skyvaultazi, torch.tensor([k * skyvaultaziint[j] + azistart[j]], device=device)))
+            skyvaultalt = torch.cat((skyvaultalt, as_tensor([skyvaultaltint[j]], device=device)))
+            skyvaultazi = torch.cat((skyvaultazi, as_tensor([k * skyvaultaziint[j] + azistart[j]], device=device)))
 
     return skyvaultalt, skyvaultazi, annulino, skyvaultaltint, patches_in_band, skyvaultaziint, azistart
 
@@ -524,7 +525,7 @@ def svf_calculator(patch_option, amaxvalue=None, a=None, vegdem=None, vegdem2=No
     svfNaveg = torch.zeros((rows, cols), device=device)
 
     skyvaultalt, skyvaultazi, annulino, skyvaultaltint, aziinterval, skyvaultaziint, azistart = create_patches(patch_option)
-    skyvaultaziint = torch.tensor([360 / patches for patches in aziinterval], device=device)
+    skyvaultaziint = as_tensor([360 / patches for patches in aziinterval], device=device)
     iazimuth = torch.zeros((1, torch.sum(aziinterval).item()), device=device)
 
     shmat = torch.zeros((rows, cols, sum(aziinterval)), device=device)
@@ -608,7 +609,7 @@ def svf_calculator(patch_option, amaxvalue=None, a=None, vegdem=None, vegdem2=No
     svfWaveg[svfWaveg > 1.] = 1.
     svfNaveg[svfNaveg > 1.] = 1.
 
-    trans = torch.tensor(0.03, device=device)  # Tree transmission hardcoded to 3%
+    trans = as_tensor(0.03, device=device)  # Tree transmission hardcoded to 3%
     SVFtotal = svf - (1 - svfveg) * (1 - trans)
 
     if save_rasters:
@@ -619,7 +620,7 @@ def svf_calculator(patch_option, amaxvalue=None, a=None, vegdem=None, vegdem2=No
         )
 
     del sh, vegsh,vbshvegsh, last, weight
-    torch.cuda.empty_cache()
+    empty_cache()
     
     return svf, svfaveg, svfE, svfEaveg, svfEveg, svfN, svfNaveg, svfNveg, svfS, svfSaveg, svfSveg, svfveg, svfW, svfWaveg, svfWveg, vegshmat, vbshvegshmat, shmat, SVFtotal
 

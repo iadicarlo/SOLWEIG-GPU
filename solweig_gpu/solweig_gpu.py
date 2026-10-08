@@ -10,6 +10,7 @@
 #but WITHOUT ANY WARRANTY; without even the implied warranty of
 #MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 #GNU General Public License for more details.
+from .device import get_device, empty_cache, as_tensor
 from typing import Optional, List
 
 # Lazy imports used below to avoid loading heavy deps at import time.
@@ -379,8 +380,7 @@ def calculate_svf(base_path: str, patch_option: int = 2, overwrite: bool = False
         # Do not keep GPU tensors in memory after each tile.
         del svf_results
 
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        empty_cache()
 
     print("[INFO] Standalone SVF calculation complete.")
 
@@ -494,7 +494,7 @@ def run_utci_tiles(
             save_ta=save_ta,
             save_wind=save_wind,
         )
-        torch.cuda.empty_cache()
+        empty_cache()
 
 
 def thermal_comfort(

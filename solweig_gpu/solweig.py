@@ -22,6 +22,7 @@ import datetime
 import calendar
 import scipy.ndimage.interpolation as sc
 import torch
+from .device import get_device, empty_cache, as_tensor
 import torch.nn.functional as F
 from scipy.ndimage import rotate
 from .shadow import create_patches
@@ -39,9 +40,9 @@ def ensure_tensor(x, device=None):
         torch.Tensor: Input as tensor on device
     """
     if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = get_device()
     if not isinstance(x, torch.Tensor):
-        x = torch.tensor(x, device=device)
+        x = as_tensor(x, device=device)
     return x
 
 def daylen(DOY, XLAT):
@@ -106,14 +107,14 @@ def sunonsurface_2018a(azimuthA, scale, buildings, shadow, sunwall, first, secon
         tuple: Radiation components for different surfaces
     """
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
 
     # Convert inputs to tensors on the GPU
 
-    scale = torch.tensor(scale, device=device).clone().detach()
-    ewall = torch.tensor(ewall, device=device).clone().detach()
-    albedo_b = torch.tensor(albedo_b, device=device).clone().detach()
-    landcover = torch.tensor(landcover, device=device).clone().detach()
+    scale = as_tensor(scale, device=device).clone().detach()
+    ewall = as_tensor(ewall, device=device).clone().detach()
+    albedo_b = as_tensor(albedo_b, device=device).clone().detach()
+    landcover = as_tensor(landcover, device=device).clone().detach()
 
     sizex = walls.shape[0]
     sizey = walls.shape[1]
@@ -318,7 +319,7 @@ def gvf_2018a(wallsun, walls, buildings, scale, shadow, first, second, dirwalls,
     Returns:
         tuple: View factors and albedo components for different directions
     """
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
 
     azimuthA = torch.arange(5, 359, 20, device=device, dtype=torch.float32)  # Search directions for Ground View Factors (GVF)
 
@@ -415,9 +416,9 @@ def cylindric_wedge(zen, svfalfa, rows, cols):
     """
     np.seterr(divide='ignore', invalid='ignore')
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
 
-    beta = torch.tensor(zen, device=device, dtype=torch.float32)
+    beta = as_tensor(zen, device=device, dtype=torch.float32)
     alfa = torch.zeros((rows, cols), device=device) + svfalfa
 
     xa = 1 - 2. / (torch.tan(alfa) * torch.tan(beta))
@@ -464,16 +465,16 @@ def TsWaveDelay_2015a(gvfLup, firstdaytime, timeadd, timestepdec, Tgmap1):
     Returns:
         torch.Tensor: Temperature with wave delay applied
     """
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
 
-    # gvfLup = torch.tensor(gvfLup, device=device)
+    # gvfLup = as_tensor(gvfLup, device=device)
     Tgmap0 = gvfLup  # current timestep
 
     if firstdaytime == 1:  # "first in morning"
         Tgmap1 = Tgmap0
 
     if timeadd >= (59 / 1440):  # more or equal to 59 min
-        weight1 = torch.exp(-33.27 * torch.tensor(timeadd))  # surface temperature delay function - 1 step
+        weight1 = torch.exp(-33.27 * as_tensor(timeadd))  # surface temperature delay function - 1 step
         Tgmap1 = Tgmap0 * (1 - weight1) + Tgmap1 * weight1
         Lup = Tgmap1
         if timestepdec > (59 / 1440):
@@ -482,7 +483,7 @@ def TsWaveDelay_2015a(gvfLup, firstdaytime, timeadd, timestepdec, Tgmap1):
             timeadd = 0
     else:
         timeadd = timeadd + timestepdec
-        weight1 = torch.exp(-33.27 * torch.tensor(timeadd))  # surface temperature delay function - 1 step
+        weight1 = torch.exp(-33.27 * as_tensor(timeadd))  # surface temperature delay function - 1 step
         Lup = (Tgmap0 * (1 - weight1) + Tgmap1 * weight1)
 
     return Lup, timeadd, Tgmap1
@@ -496,9 +497,9 @@ def Kup_veg_2015a(radI, radD, radG, altitude, svfbuveg, albedo_b, F_sh, gvfalb, 
     Returns:
         tuple: Upward shortwave components for different directions
     """
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
 
-    albedo_b = torch.tensor(albedo_b, device=device).clone().detach()
+    albedo_b = as_tensor(albedo_b, device=device).clone().detach()
     Kup = (gvfalb * radI * torch.sin(altitude * (torch.pi / 180.))) + (radD * svfbuveg + albedo_b * (1 - svfbuveg) * (radG * (1 - F_sh) + radD * F_sh)) * gvfalbnosh
     KupE = (gvfalbE * radI * torch.sin(altitude * (torch.pi / 180.))) + (radD * svfbuveg + albedo_b * (1 - svfbuveg) * (radG * (1 - F_sh) + radD * F_sh)) * gvfalbnoshE
     KupS = (gvfalbS * radI * torch.sin(altitude * (torch.pi / 180.))) + (radD * svfbuveg + albedo_b * (1 - svfbuveg) * (radG * (1 - F_sh) + radD * F_sh)) * gvfalbnoshS
@@ -509,7 +510,7 @@ def Kup_veg_2015a(radI, radD, radG, altitude, svfbuveg, albedo_b, F_sh, gvfalb, 
 
 def Kvikt_veg(svf, svfveg, vikttot):
     """Calculate shortwave weight factor accounting for vegetation."""
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
 
     viktwall = (vikttot - (63.227 * svf ** 6 - 161.51 * svf ** 5 + 156.91 * svf ** 4 - 70.424 * svf ** 3 + 16.773 * svf ** 2 - 0.4863 * svf)) / vikttot
     svfvegbu = (svfveg + svf - 1)
@@ -535,7 +536,7 @@ def shaded_or_sunlit(solar_altitude, solar_azimuth, patch_altitude, patch_azimut
     Returns:
         torch.Tensor: Binary mask (1=sunlit, 0=shaded)
     """
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
 
     # Patch azimuth in relation to sun azimuth
     patch_to_sun_azi = torch.abs(solar_azimuth - patch_azimuth)
@@ -593,7 +594,7 @@ def Kside_veg_v2022a(radI, radD, radG, shadow, svfS, svfW, svfN, svfE, svfEveg, 
         tuple: (Keast, Ksouth, Kwest, Knorth, KsideI, KsideD, Kside) - 
                Shortwave radiation components for each direction
     """
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
 
     vikttot = 4.4897
     aziE = azimuth + t
@@ -601,7 +602,7 @@ def Kside_veg_v2022a(radI, radD, radG, shadow, svfS, svfW, svfN, svfE, svfEveg, 
     aziW = azimuth - 180 + t
     aziN = azimuth - 270 + t
     deg2rad = torch.pi / 180.0
-    deg2rad = torch.tensor(deg2rad)
+    deg2rad = as_tensor(deg2rad)
 
     KsideD = torch.zeros((rows, cols), device=device)
     Kref_sun = torch.zeros((rows, cols), device=device)
@@ -633,7 +634,7 @@ def Kside_veg_v2022a(radI, radD, radG, shadow, svfS, svfW, svfN, svfE, svfEveg, 
     diffRadW = torch.zeros((rows, cols), device=device)
     diffRadN = torch.zeros((rows, cols), device=device)
 
-    altitude = torch.tensor(altitude)
+    altitude = as_tensor(altitude)
     if cyl == 1:
         KsideI = shadow * radI * torch.cos(altitude * deg2rad)
         KeastI = torch.zeros((rows, cols), device=device)
@@ -694,7 +695,7 @@ def Kside_veg_v2022a(radI, radD, radG, shadow, svfS, svfW, svfN, svfE, svfEveg, 
 
         if cyl == 1:
             for idx in range(patch_azimuth.shape[0]):
-                anglIncC = torch.cos(patch_altitude[idx] * deg2rad) * torch.cos(torch.tensor(0.))
+                anglIncC = torch.cos(patch_altitude[idx] * deg2rad) * torch.cos(as_tensor(0.))
                 KsideD += diffsh[:, :, idx] * lumChi[idx] * anglIncC * steradian[idx]
 
                 sunlit_surface = ((albedo * (radI * torch.cos(altitude * deg2rad)) + (radD * 0.5)) / torch.pi)
@@ -822,7 +823,7 @@ def sun_distance(jday):
     Returns:
         torch.Tensor: Distance correction factor (dimensionless)
     """
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
 
     b = 2. * torch.pi * jday / 365.
     D = torch.sqrt(1.00011 + 0.034221 * torch.cos(b) + 0.001280 * torch.sin(b) + 0.000719 * torch.cos(2. * b) + 0.000077 * torch.sin(2. * b))
@@ -844,7 +845,7 @@ def clearnessindex_2013b(zen, jday, Ta, RH, radG, location, P):
     Returns:
         torch.Tensor: Clearness index (dimensionless, 0-1)
     """
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
 
     if P == -999.0:
         p = 1013.0  # Pressure in millibars
@@ -887,16 +888,16 @@ def clearnessindex_2013b(zen, jday, Ta, RH, radG, location, P):
         G = G[3]
 
     # dewpoint calculation
-    a2 = torch.tensor(17.27,device=device)
-    b2 = torch.tensor(237.7,device=device)
+    a2 = as_tensor(17.27,device=device)
+    b2 = as_tensor(237.7,device=device)
     Td = (b2 * (((a2 * Ta) / (b2 + Ta)) + torch.log(RH))) / (a2 - (((a2 * Ta) / (b2 + Ta)) + torch.log(RH)))
     Td = (Td * 1.8) + 32  # Dewpoint (F)
-    u = torch.exp(0.1133 - torch.log(torch.tensor(G + 1.)) + 0.0393 * Td) 
+    u = torch.exp(0.1133 - torch.log(as_tensor(G + 1.)) + 0.0393 * Td) 
     Tw = 1 - 0.077 * ((u * m) ** 0.3)  # Transmission coefficient for water vapor
     Tar = 0.935 ** m  # Transmission coefficient for aerosols
     I0 = Itoa * torch.cos(zen) * Trpg * Tw * D * Tar
-    I0 = torch.where(torch.abs(zen) > torch.pi / 2, torch.tensor(0.0, device=device), I0)
-    I0 = torch.where(torch.isnan(I0), torch.tensor(0.0, device=device), I0)
+    I0 = torch.where(torch.abs(zen) > torch.pi / 2, as_tensor(0.0, device=device), I0)
+    I0 = torch.where(torch.isnan(I0), as_tensor(0.0, device=device), I0)
     corr = 0.1473 * torch.log(90 - (zen / torch.pi * 180)) + 0.3454  # 20070329
     CIuncorr = radG / I0
     CI = CIuncorr + (1 - corr)
@@ -923,7 +924,7 @@ def diffusefraction(radG, altitude, Kt, Ta, RH):
             - radD: Diffuse radiation (W/m²)
             - radI: Direct beam radiation (W/m²)
     """
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
     Ta = ensure_tensor(Ta)
     RH = ensure_tensor(RH)
     alfa = altitude * (torch.pi / 180.0)
@@ -947,7 +948,7 @@ def diffusefraction(radG, altitude, Kt, Ta, RH):
     radI = (radG - radD) / torch.sin(alfa)
 
     # Corrections for low sun altitudes (20130307)
-    radI = torch.where(radI < 0, torch.tensor(0.0, device=device), radI)
+    radI = torch.where(radI < 0, as_tensor(0.0, device=device), radI)
     radI = torch.where((altitude < 1) & (radI > radG), radG, radI)
     radD = torch.where(radD > radG, radG, radD)
 
@@ -963,22 +964,22 @@ def shadowingfunction_wallheight_13(a, azimuth, altitude, scale, walls, aspect):
     Returns:
         tuple: (vegsh, sh, vbshvegsh, wallsh, wallsun, wallshve, facesh, facesun)
     """
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
 
     if not walls.size:
         pass
         # Add the implementation for creating walls if needed
 
-    azimuth = torch.tensor(azimuth * (torch.pi / 180.0), device=device).clone().detach()
-    altitude = torch.tensor(altitude * (torch.pi / 180.0), device=device).clone().detach()
+    azimuth = as_tensor(azimuth * (torch.pi / 180.0), device=device).clone().detach()
+    altitude = as_tensor(altitude * (torch.pi / 180.0), device=device).clone().detach()
 
     sizex = a.shape[0]
     sizey = a.shape[1]
 
-    f = torch.tensor(a, device=device).clone().detach()
-    dx = torch.tensor(0.0, device=device).clone().detach()
-    dy = torch.tensor(0.0, device=device).clone().detach()
-    dz = torch.tensor(0.0, device=device).clone().detach()
+    f = as_tensor(a, device=device).clone().detach()
+    dx = as_tensor(0.0, device=device).clone().detach()
+    dy = as_tensor(0.0, device=device).clone().detach()
+    dz = as_tensor(0.0, device=device).clone().detach()
     temp = torch.zeros((sizex, sizey), device=device).clone().detach()
     wallbol = (walls > 0).float()
 
@@ -1041,7 +1042,7 @@ def shadowingfunction_wallheight_13(a, azimuth, altitude, scale, walls, aspect):
         azihigh = azihigh - 2 * torch.pi
         facesh = torch.logical_or(aspect > azilow, aspect <= azihigh).float() * -1 + 1
 
-    sh = f - torch.tensor(a, device=device)
+    sh = f - as_tensor(a, device=device)
     facesun = torch.logical_and(facesh + wallbol == 1, walls > 0).float()
     wallsun = walls - sh
     wallsun[wallsun < 0] = 0
@@ -1065,18 +1066,18 @@ def shadowingfunction_wallheight_23(a, vegdem, vegdem2, azimuth, altitude, scale
     Returns:
         tuple: Shadow components including vegetation effects
     """
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
 
-    degrees = torch.tensor(np.pi / 180.0, device=device)
-    azimuth = torch.tensor(azimuth, device=device) * degrees
-    altitude = torch.tensor(altitude, device=device) * degrees
+    degrees = as_tensor(np.pi / 180.0, device=device)
+    azimuth = as_tensor(azimuth, device=device) * degrees
+    altitude = as_tensor(altitude, device=device) * degrees
 
     sizex, sizey = a.shape
 
     # initialise parameters
-    dx = torch.tensor(0.0, device=device)
-    dy = torch.tensor(0.0, device=device)
-    dz = torch.tensor(0.0, device=device)
+    dx = as_tensor(0.0, device=device)
+    dy = as_tensor(0.0, device=device)
+    dz = as_tensor(0.0, device=device)
     temp = torch.zeros((sizex, sizey), device=device)
     tempvegdem = torch.zeros((sizex, sizey), device=device)
     tempvegdem2 = torch.zeros((sizex, sizey), device=device)
@@ -1090,7 +1091,7 @@ def shadowingfunction_wallheight_23(a, vegdem, vegdem2, azimuth, altitude, scale
     shvoveg = vegdem 
     wallbol = (walls > 0).float()
 
-    pibyfour = torch.tensor(np.pi / 4.0, device=device)
+    pibyfour = as_tensor(np.pi / 4.0, device=device)
     threetimespibyfour = 3 * pibyfour
     fivetimespibyfour = 5 * pibyfour
     seventimespibyfour = 7 * pibyfour
@@ -1104,7 +1105,7 @@ def shadowingfunction_wallheight_23(a, vegdem, vegdem2, azimuth, altitude, scale
     tanaltitudebyscale = torch.tan(altitude) / scale
 
     index = 0
-    dzprev = torch.tensor(0.0, device=device)
+    dzprev = as_tensor(0.0, device=device)
     fabovea = None
     gabovea = None
     lastfabovea = None
@@ -1145,7 +1146,7 @@ def shadowingfunction_wallheight_23(a, vegdem, vegdem2, azimuth, altitude, scale
 
         f = torch.maximum(f, temp) # Moving building shadow
         shvoveg = torch.maximum(shvoveg, tempvegdem) # moving vegetation shadow volume
-        sh = torch.where(f > a, torch.tensor(1.0, device=device), torch.tensor(0.0, device=device))
+        sh = torch.where(f > a, as_tensor(1.0, device=device), as_tensor(0.0, device=device))
         fabovea = (tempvegdem > a).float()   # vegdem above DEM
         gabovea = (tempvegdem2 > a).float()   # vegdem2 above DEM
 
@@ -1155,11 +1156,11 @@ def shadowingfunction_wallheight_23(a, vegdem, vegdem2, azimuth, altitude, scale
         lastgabovea = templastgabovea > a
         dzprev = dz
         vegsh2 = fabovea + gabovea + lastfabovea.float() + lastgabovea.float()
-        vegsh2 = torch.where(vegsh2 == 4, torch.tensor(0.0, device=device), vegsh2)
-        vegsh2 = torch.where(vegsh2 > 0, torch.tensor(1.0, device=device), vegsh2)
+        vegsh2 = torch.where(vegsh2 == 4, as_tensor(0.0, device=device), vegsh2)
+        vegsh2 = torch.where(vegsh2 > 0, as_tensor(1.0, device=device), vegsh2)
 
         vegsh = torch.maximum(vegsh, vegsh2)
-        vegsh = torch.where(vegsh * sh > 0, torch.tensor(0.0, device=device), vegsh)
+        vegsh = torch.where(vegsh * sh > 0, as_tensor(0.0, device=device), vegsh)
         vbshvegsh = vbshvegsh + vegsh
 
         index += 1
@@ -1176,10 +1177,10 @@ def shadowingfunction_wallheight_23(a, vegdem, vegdem2, azimuth, altitude, scale
         facesh = torch.logical_or(aspect > azilow, aspect <= azihigh).float() * -1 + 1
 
     sh = 1 - sh
-    vbshvegsh = torch.where(vbshvegsh > 0, torch.tensor(1.0, device=device), vbshvegsh)
+    vbshvegsh = torch.where(vbshvegsh > 0, as_tensor(1.0, device=device), vbshvegsh)
     vbshvegsh = vbshvegsh - vegsh
 
-    vegsh = torch.where(vegsh > 0, torch.tensor(1.0, device=device), vegsh)
+    vegsh = torch.where(vegsh > 0, as_tensor(1.0, device=device), vegsh)
     shvoveg = (shvoveg - a) * vegsh  # Vegetation shadow volume
     vegsh = 1 - vegsh
     vbshvegsh = 1 - vbshvegsh
@@ -1187,15 +1188,15 @@ def shadowingfunction_wallheight_23(a, vegdem, vegdem2, azimuth, altitude, scale
     shvo = f - a   # building shadow volume
     facesun = torch.logical_and(facesh + wallbol == 1, walls > 0).float()
     wallsun = walls - shvo
-    wallsun = torch.where(wallsun < 0, torch.tensor(0.0, device=device), wallsun)
-    wallsun = torch.where(facesh == 1, torch.tensor(0.0, device=device), wallsun)
+    wallsun = torch.where(wallsun < 0, as_tensor(0.0, device=device), wallsun)
+    wallsun = torch.where(facesh == 1, as_tensor(0.0, device=device), wallsun)
     wallsh = walls - wallsun
 
     wallshve = shvoveg * wallbol
     wallshve = wallshve - wallsh
-    wallshve = torch.where(wallshve < 0, torch.tensor(0.0, device=device), wallshve)
+    wallshve = torch.where(wallshve < 0, as_tensor(0.0, device=device), wallshve)
     wallsun = wallsun - wallshve
-    wallsun = torch.where(wallsun < 0, torch.tensor(0.0, device=device), wallsun)
+    wallsun = torch.where(wallsun < 0, as_tensor(0.0, device=device), wallsun)
     wallshve = torch.where(wallshve > walls, walls, wallshve)
 
     del fabovea,gabovea,lastfabovea,lastgabovea,vegsh2
@@ -1227,28 +1228,28 @@ def Perez_v3(zen, azimuth, radD, radI, jday, patchchoice, patch_option):
         Perez et al. (1993). All-weather model for sky luminance distribution.
         Solar Energy, 50(3), 235-245.
     """
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
 
-    m_a1 = torch.tensor([1.3525, -1.2219, -1.1000, -0.5484, -0.6000, -1.0156, -1.0000, -1.0500], device=device)
-    m_a2 = torch.tensor([-0.2576, -0.7730, -0.2515, -0.6654, -0.3566, -0.3670, 0.0211, 0.0289], device=device)
-    m_a3 = torch.tensor([-0.2690, 1.4148, 0.8952, -0.2672, -2.5000, 1.0078, 0.5025, 0.4260], device=device)
-    m_a4 = torch.tensor([-1.4366, 1.1016, 0.0156, 0.7117, 2.3250, 1.4051, -0.5119, 0.3590], device=device)
-    m_b1 = torch.tensor([-0.7670, -0.2054, 0.2782, 0.7234, 0.2937, 0.2875, -0.3000, -0.3250], device=device)
-    m_b2 = torch.tensor([0.0007, 0.0367, -0.1812, -0.6219, 0.0496, -0.5328, 0.1922, 0.1156], device=device)
-    m_b3 = torch.tensor([1.2734, -3.9128, -4.5000, -5.6812, -5.6812, -3.8500, 0.7023, 0.7781], device=device)
-    m_b4 = torch.tensor([-0.1233, 0.9156, 1.1766, 2.6297, 1.8415, 3.3750, -1.6317, 0.0025], device=device)
-    m_c1 = torch.tensor([2.8000, 6.9750, 24.7219, 33.3389, 21.0000, 14.0000, 19.0000, 31.0625], device=device)
-    m_c2 = torch.tensor([0.6004, 0.1774, -13.0812, -18.3000, -4.7656, -0.9999, -5.0000, -14.5000], device=device)
-    m_c3 = torch.tensor([1.2375, 6.4477, -37.7000, -62.2500, -21.5906, -7.1406, 1.2438, -46.1148], device=device)
-    m_c4 = torch.tensor([1.0000, -0.1239, 34.8438, 52.0781, 7.2492, 7.5469, -1.9094, 55.3750], device=device)
-    m_d1 = torch.tensor([1.8734, -1.5798, -5.0000, -3.5000, -3.5000, -3.4000, -4.0000, -7.2312], device=device)
-    m_d2 = torch.tensor([0.6297, -0.5081, 1.5218, 0.0016, -0.1554, -0.1078, 0.0250, 0.4050], device=device)
-    m_d3 = torch.tensor([0.9738, -1.7812, 3.9229, 1.1477, 1.4062, -1.0750, 0.3844, 13.3500], device=device)
-    m_d4 = torch.tensor([0.2809, 0.1080, -2.6204, 0.1062, 0.3988, 1.5702, 0.2656, 0.6234], device=device)
-    m_e1 = torch.tensor([0.0356, 0.2624, -0.0156, 0.4659, 0.0032, -0.0672, 1.0468, 1.5000], device=device)
-    m_e2 = torch.tensor([-0.1246, 0.0672, 0.1597, -0.3296, 0.0766, 0.4016, -0.3788, -0.6426], device=device)
-    m_e3 = torch.tensor([-0.5718, -0.2190, 0.4199, -0.0876, -0.0656, 0.3017, -2.4517, 1.8564], device=device)
-    m_e4 = torch.tensor([0.9938, -0.4285, -0.5562, -0.0329, -0.1294, -0.4844, 1.4656, 0.5636], device=device)
+    m_a1 = as_tensor([1.3525, -1.2219, -1.1000, -0.5484, -0.6000, -1.0156, -1.0000, -1.0500], device=device)
+    m_a2 = as_tensor([-0.2576, -0.7730, -0.2515, -0.6654, -0.3566, -0.3670, 0.0211, 0.0289], device=device)
+    m_a3 = as_tensor([-0.2690, 1.4148, 0.8952, -0.2672, -2.5000, 1.0078, 0.5025, 0.4260], device=device)
+    m_a4 = as_tensor([-1.4366, 1.1016, 0.0156, 0.7117, 2.3250, 1.4051, -0.5119, 0.3590], device=device)
+    m_b1 = as_tensor([-0.7670, -0.2054, 0.2782, 0.7234, 0.2937, 0.2875, -0.3000, -0.3250], device=device)
+    m_b2 = as_tensor([0.0007, 0.0367, -0.1812, -0.6219, 0.0496, -0.5328, 0.1922, 0.1156], device=device)
+    m_b3 = as_tensor([1.2734, -3.9128, -4.5000, -5.6812, -5.6812, -3.8500, 0.7023, 0.7781], device=device)
+    m_b4 = as_tensor([-0.1233, 0.9156, 1.1766, 2.6297, 1.8415, 3.3750, -1.6317, 0.0025], device=device)
+    m_c1 = as_tensor([2.8000, 6.9750, 24.7219, 33.3389, 21.0000, 14.0000, 19.0000, 31.0625], device=device)
+    m_c2 = as_tensor([0.6004, 0.1774, -13.0812, -18.3000, -4.7656, -0.9999, -5.0000, -14.5000], device=device)
+    m_c3 = as_tensor([1.2375, 6.4477, -37.7000, -62.2500, -21.5906, -7.1406, 1.2438, -46.1148], device=device)
+    m_c4 = as_tensor([1.0000, -0.1239, 34.8438, 52.0781, 7.2492, 7.5469, -1.9094, 55.3750], device=device)
+    m_d1 = as_tensor([1.8734, -1.5798, -5.0000, -3.5000, -3.5000, -3.4000, -4.0000, -7.2312], device=device)
+    m_d2 = as_tensor([0.6297, -0.5081, 1.5218, 0.0016, -0.1554, -0.1078, 0.0250, 0.4050], device=device)
+    m_d3 = as_tensor([0.9738, -1.7812, 3.9229, 1.1477, 1.4062, -1.0750, 0.3844, 13.3500], device=device)
+    m_d4 = as_tensor([0.2809, 0.1080, -2.6204, 0.1062, 0.3988, 1.5702, 0.2656, 0.6234], device=device)
+    m_e1 = as_tensor([0.0356, 0.2624, -0.0156, 0.4659, 0.0032, -0.0672, 1.0468, 1.5000], device=device)
+    m_e2 = as_tensor([-0.1246, 0.0672, 0.1597, -0.3296, 0.0766, 0.4016, -0.3788, -0.6426], device=device)
+    m_e3 = as_tensor([-0.5718, -0.2190, 0.4199, -0.0876, -0.0656, 0.3017, -2.4517, 1.8564], device=device)
+    m_e4 = as_tensor([0.9938, -0.4285, -0.5562, -0.0329, -0.1294, -0.4844, 1.4656, 0.5636], device=device)
 
     acoeff = torch.stack([m_a1, m_a2, m_a3, m_a4], dim=1)
     bcoeff = torch.stack([m_b1, m_b2, m_b3, m_b4], dim=1)
@@ -1256,20 +1257,20 @@ def Perez_v3(zen, azimuth, radD, radI, jday, patchchoice, patch_option):
     dcoeff = torch.stack([m_d1, m_d2, m_d3, m_d4], dim=1)
     ecoeff = torch.stack([m_e1, m_e2, m_e3, m_e4], dim=1)
 
-    deg2rad = torch.tensor(np.pi / 180, device=device).clone().detach()
-    rad2deg = torch.tensor(180 / np.pi, device=device).clone().detach()
+    deg2rad = as_tensor(np.pi / 180, device=device).clone().detach()
+    rad2deg = as_tensor(180 / np.pi, device=device).clone().detach()
     altitude = 90 - zen
-    zen = torch.tensor(zen, device=device) * deg2rad
-    azimuth = torch.tensor(azimuth, device=device) * deg2rad
-    altitude = torch.tensor(altitude, device=device) * deg2rad
+    zen = as_tensor(zen, device=device) * deg2rad
+    azimuth = as_tensor(azimuth, device=device) * deg2rad
+    altitude = as_tensor(altitude, device=device) * deg2rad
     Idh = radD 
     Ibn = radI
 
     PerezClearness = ((Idh + Ibn) / (Idh + 1.041 * torch.pow(zen, 3))) / (1 + 1.041 * torch.pow(zen, 3))
 
     day_angle = jday * 2 * torch.pi / 365
-    I0 = 1367 * (1.00011 + 0.034221 * torch.cos(torch.tensor(day_angle)) + 0.00128 * torch.sin(torch.tensor(day_angle)) + 0.000719 *
-                 torch.cos(2 * torch.tensor(day_angle)) + 0.000077 * torch.sin(2 * torch.tensor(day_angle)))
+    I0 = 1367 * (1.00011 + 0.034221 * torch.cos(as_tensor(day_angle)) + 0.00128 * torch.sin(as_tensor(day_angle)) + 0.000719 *
+                 torch.cos(2 * as_tensor(day_angle)) + 0.000077 * torch.sin(2 * as_tensor(day_angle)))
 
     if altitude >= 10 * deg2rad:
         AirMass = 1 / torch.sin(altitude)
@@ -1280,7 +1281,7 @@ def Perez_v3(zen, azimuth, radD, radI, jday, patchchoice, patch_option):
 
     PerezBrightness = (AirMass * Idh) / I0
     if Idh <= 10:
-        PerezBrightness = torch.tensor(0.0, device=device)
+        PerezBrightness = as_tensor(0.0, device=device)
 
     if PerezClearness < 1.065:
         intClearness = 0
@@ -1342,10 +1343,10 @@ def Perez_v3(zen, azimuth, radD, radI, jday, patchchoice, patch_option):
 
 def model1(sky_patches, esky, Ta):
     """Calculate longwave sky radiation using Model 1 (isotropic)."""
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
 
     SBC = 5.67051e-8
-    deg2rad = torch.tensor(np.pi / 180, device=device)
+    deg2rad = as_tensor(np.pi / 180, device=device)
 
     skyalt, skyalt_c = torch.unique(sky_patches[:, 0], return_counts=True)
     skyzen = 90 - skyalt
@@ -1373,8 +1374,8 @@ def model1(sky_patches, esky, Ta):
 
 def model2(sky_patches, esky, Ta):
     """Calculate longwave sky radiation using Model 2 (simple anisotropic)."""
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    deg2rad = torch.tensor(np.pi / 180, device=device)
+    device = get_device()
+    deg2rad = as_tensor(np.pi / 180, device=device)
 
     skyalt, skyalt_c = torch.unique(sky_patches[:, 0], return_counts=True)
     skyzen = 90 - skyalt
@@ -1395,8 +1396,8 @@ def model2(sky_patches, esky, Ta):
 
 def model3(sky_patches, esky, Ta):
     """Calculate longwave sky radiation using Model 3 (advanced anisotropic)."""
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    deg2rad = torch.tensor(np.pi / 180, device=device)
+    device = get_device()
+    deg2rad = as_tensor(np.pi / 180, device=device)
 
     skyalt, skyalt_c = torch.unique(sky_patches[:, 0], return_counts=True)
     skyzen = 90 - skyalt
@@ -1455,11 +1456,11 @@ def define_patch_characteristics(solar_altitude, solar_azimuth,
         - Computes directional components (E, S, W, N)
     """
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
 
     # Stefan-Boltzmann's Constant
-    SBC = torch.tensor(5.67051e-8, device=device)
-    deg2rad = torch.tensor(np.pi / 180, device=device)
+    SBC = as_tensor(5.67051e-8, device=device)
+    deg2rad = as_tensor(np.pi / 180, device=device)
 
     # Define variables
     Ldown = torch.zeros((rows, cols), device=device)
@@ -1481,7 +1482,7 @@ def define_patch_characteristics(solar_altitude, solar_azimuth,
     Lnorth = torch.zeros((rows, cols), device=device)
     Lsouth = torch.zeros((rows, cols), device=device)
 
-    ewall = torch.tensor(ewall, device=device).clone().detach()
+    ewall = as_tensor(ewall, device=device).clone().detach()
 
     for idx in range(patch_altitude.shape[0]):
         # Calculations for patches on sky, shmat = 1 = sky is visible
@@ -1496,7 +1497,7 @@ def define_patch_characteristics(solar_altitude, solar_azimuth,
         # Calculations for patches that are vegetation, vegshmat = 0 = shade from vegetation
         temp_vegsh = ((vegshmat[:, :, idx] == 0) | (vbshvegshmat[:, :, idx] == 0))
         # Longwave radiation from vegetation surface (considered vertical)
-        vegetation_surface = ((ewall * SBC * ((Ta + 273.15) ** 4)) / torch.tensor(np.pi, device=device))
+        vegetation_surface = ((ewall * SBC * ((Ta + 273.15) ** 4)) / as_tensor(np.pi, device=device))
 
         # Longwave radiation reaching a vertical surface
         Lside_veg += vegetation_surface * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_vegsh
@@ -1524,9 +1525,9 @@ def define_patch_characteristics(solar_altitude, solar_azimuth,
         azimuth_difference = torch.abs(solar_azimuth - patch_azimuth[idx])
 
         # Longwave radiation from sunlit surfaces
-        sunlit_surface = ((ewall * SBC * ((Ta + Tgwall + 273.15) ** 4)) / torch.tensor(np.pi, device=device))
+        sunlit_surface = ((ewall * SBC * ((Ta + Tgwall + 273.15) ** 4)) / as_tensor(np.pi, device=device))
         # Longwave radiation from shaded surfaces
-        shaded_surface = ((ewall * SBC * ((Ta + 273.15) ** 4)) / torch.tensor(np.pi, device=device))
+        shaded_surface = ((ewall * SBC * ((Ta + 273.15) ** 4)) / as_tensor(np.pi, device=device))
         if ((azimuth_difference > 90) and (azimuth_difference < 270) and (solar_altitude > 0)):
             # Calculate which patches defined as buildings that are sunlit or shaded
             sunlit_patches, shaded_patches = shaded_or_sunlit(solar_altitude, solar_azimuth, patch_altitude[idx], patch_azimuth[idx], asvf)
@@ -1573,7 +1574,7 @@ def define_patch_characteristics(solar_altitude, solar_azimuth,
                 Lnorth += shaded_surface * steradian[idx] * torch.cos(patch_altitude[idx] * deg2rad) * temp_sh * torch.cos((0 - patch_azimuth[idx]) * deg2rad)
 
     # Calculate reflected longwave in each patch
-    reflected_on_surfaces = (((Ldown_sky + Lup) * (1 - ewall) * 0.5) / torch.tensor(np.pi, device=device))
+    reflected_on_surfaces = (((Ldown_sky + Lup) * (1 - ewall) * 0.5) / as_tensor(np.pi, device=device))
     for idx in range(patch_altitude.shape[0]):
         temp_sh = ((shmat[:, :, idx] == 0) | (vegshmat[:, :, idx] == 0) | (vbshvegshmat[:, :, idx] == 0))
 
@@ -1631,22 +1632,22 @@ def Lcyl_v2022a(esky, sky_patches, Ta, Tgwall, ewall, Lup, shmat, vegshmat, vbsh
     """
 
     # Device for GPU computation
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
 
     # Stefan-Boltzmann's Constant
-    SBC = torch.tensor(5.67051e-8, device=device).clone().detach()
+    SBC = as_tensor(5.67051e-8, device=device).clone().detach()
 
     # Sky longwave radiation from emissivity based on Prata (1996)
     Ldown_prata = (esky * SBC * ((Ta + 273.15) ** 4))
 
     # Degrees to radians
-    deg2rad = torch.tensor(np.pi / 180, device=device).clone().detach()
+    deg2rad = as_tensor(np.pi / 180, device=device).clone().detach()
 
     # Unique altitudes for patches
     sky_patches_cpu = sky_patches.cpu().numpy()
     skyalt, skyalt_c = np.unique(sky_patches_cpu[:, 0], return_counts=True)
-    skyalt = torch.tensor(skyalt, device=device).clone().detach()
-    skyalt_c = torch.tensor(skyalt_c, device=device).clone().detach()
+    skyalt = as_tensor(skyalt, device=device).clone().detach()
+    skyalt_c = as_tensor(skyalt_c, device=device).clone().detach()
 
     # Altitudes and azimuths of the Robinson & Stone patches
     patch_altitude = sky_patches[:,0] 
@@ -1690,9 +1691,9 @@ def Lcyl_v2022a(esky, sky_patches, Ta, Tgwall, ewall, Lup, shmat, vegshmat, vbsh
         else:
             temp_emissivity = esky
         # Estimate longwave radiation on a horizontal surface (Ldown), vertical surface (Lside) and perpendicular (Lnormal)
-        Ldown[patch_altitude == altitude] = ((temp_emissivity * SBC * ((Ta + 273.15) ** 4)) / torch.tensor(np.pi, device=device)) * steradian[patch_altitude == altitude] * torch.sin(altitude * deg2rad)
-        Lside[patch_altitude == altitude] = ((temp_emissivity * SBC * ((Ta + 273.15) ** 4)) / torch.tensor(np.pi, device=device)) * steradian[patch_altitude == altitude] * torch.cos(altitude * deg2rad)
-        Lnormal[patch_altitude == altitude] = ((temp_emissivity * SBC * ((Ta + 273.15) ** 4)) / torch.tensor(np.pi, device=device)) * steradian[patch_altitude == altitude]
+        Ldown[patch_altitude == altitude] = ((temp_emissivity * SBC * ((Ta + 273.15) ** 4)) / as_tensor(np.pi, device=device)) * steradian[patch_altitude == altitude] * torch.sin(altitude * deg2rad)
+        Lside[patch_altitude == altitude] = ((temp_emissivity * SBC * ((Ta + 273.15) ** 4)) / as_tensor(np.pi, device=device)) * steradian[patch_altitude == altitude] * torch.cos(altitude * deg2rad)
+        Lnormal[patch_altitude == altitude] = ((temp_emissivity * SBC * ((Ta + 273.15) ** 4)) / as_tensor(np.pi, device=device)) * steradian[patch_altitude == altitude]
 
     Lsky_normal = torch.clone(sky_patches)
     Lsky_down = torch.clone(sky_patches)
@@ -1719,7 +1720,7 @@ def Lcyl_v2022a(esky, sky_patches, Ta, Tgwall, ewall, Lup, shmat, vegshmat, vbsh
 def Lvikt_veg(svf, svfveg, svfaveg, vikttot):
     """Calculate longwave radiation weight factors accounting for vegetation."""
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
     viktonlywall = (vikttot - (63.227 * svf ** 6 - 161.51 * svf ** 5 + 156.91 * svf ** 4 - 70.424 * svf ** 3 + 16.773 * svf ** 2 - 0.4863 * svf)) / vikttot
     viktaveg = (vikttot - (63.227 * svfaveg ** 6 - 161.51 * svfaveg ** 5 + 156.91 * svfaveg ** 4 - 70.424 * svfaveg ** 3 + 16.773 * svfaveg ** 2 - 0.4863 * svfaveg)) / vikttot
     viktwall = viktonlywall - viktaveg
@@ -1763,13 +1764,13 @@ def Lside_veg_v2022a(svfS, svfW, svfN, svfE, svfEveg, svfSveg, svfWveg, svfNveg,
         tuple: (Ldown, Lside, Least, Lwest, Lnorth, Lsouth) - Longwave components
     """
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
 
-    azimuth = torch.tensor(azimuth, device=device)
-    altitude = torch.tensor(altitude, device=device)
-    ewall = torch.tensor(ewall, device=device)
-    t = torch.tensor(t, device=device)
-    anisotropic_longwave = torch.tensor(anisotropic_longwave, device=device)
+    azimuth = as_tensor(azimuth, device=device)
+    altitude = as_tensor(altitude, device=device)
+    ewall = as_tensor(ewall, device=device)
+    t = as_tensor(t, device=device)
+    anisotropic_longwave = as_tensor(anisotropic_longwave, device=device)
 
     # Building height angle from svf
     svfalfaE = torch.arcsin(torch.exp((torch.log(1 - svfE)) / 2))
@@ -1777,7 +1778,7 @@ def Lside_veg_v2022a(svfS, svfW, svfN, svfE, svfEveg, svfSveg, svfWveg, svfNveg,
     svfalfaW = torch.arcsin(torch.exp((torch.log(1 - svfW)) / 2))
     svfalfaN = torch.arcsin(torch.exp((torch.log(1 - svfN)) / 2))
 
-    vikttot = torch.tensor(4.4897, device=device)
+    vikttot = as_tensor(4.4897, device=device)
     aziW = azimuth + t
     aziN = azimuth - 90 + t
     aziE = azimuth - 180 + t
@@ -1796,13 +1797,13 @@ def Lside_veg_v2022a(svfS, svfW, svfN, svfE, svfEveg, svfSveg, svfWveg, svfNveg,
         betaB = torch.arctan(torch.tan(svfalfaE * F_sh))
         betasun = ((alfaB - betaB) / 2) + betaB
         if (azimuth > (180 - t)) and (azimuth <= (360 - t)):
-            Lwallsun = SBC * ewall * ((Ta + 273.15 + Tw * torch.sin(aziE * (torch.tensor(np.pi, device=device) / 180))) ** 4) * viktwall * (1 - F_sh) * torch.cos(betasun) * 0.5
+            Lwallsun = SBC * ewall * ((Ta + 273.15 + Tw * torch.sin(aziE * (as_tensor(np.pi, device=device) / 180))) ** 4) * viktwall * (1 - F_sh) * torch.cos(betasun) * 0.5
             Lwallsh = SBC * ewall * ((Ta + 273.15) ** 4) * viktwall * F_sh * 0.5
         else:
-            Lwallsun = torch.tensor(0, device=device)
+            Lwallsun = as_tensor(0, device=device)
             Lwallsh = SBC * ewall * ((Ta + 273.15) ** 4) * viktwall * 0.5
     else:  # nighttime
-        Lwallsun = torch.tensor(0, device=device)
+        Lwallsun = as_tensor(0, device=device)
         Lwallsh = SBC * ewall * ((Ta + 273.15) ** 4) * viktwall * 0.5
 
     # Longwave from ground (see Lcyl_v2022a for remaining fluxes)
@@ -1824,13 +1825,13 @@ def Lside_veg_v2022a(svfS, svfW, svfN, svfE, svfEveg, svfSveg, svfWveg, svfNveg,
         betaB = torch.arctan(torch.tan(svfalfaS * F_sh))
         betasun = ((alfaB - betaB) / 2) + betaB
         if (azimuth <= (90 - t)) or (azimuth > (270 - t)):
-            Lwallsun = SBC * ewall * ((Ta + 273.15 + Tw * torch.sin(aziS * (torch.tensor(np.pi, device=device) / 180))) ** 4) * viktwall * (1 - F_sh) * torch.cos(betasun) * 0.5
+            Lwallsun = SBC * ewall * ((Ta + 273.15 + Tw * torch.sin(aziS * (as_tensor(np.pi, device=device) / 180))) ** 4) * viktwall * (1 - F_sh) * torch.cos(betasun) * 0.5
             Lwallsh = SBC * ewall * ((Ta + 273.15) ** 4) * viktwall * F_sh * 0.5
         else:
-            Lwallsun = torch.tensor(0, device=device)
+            Lwallsun = as_tensor(0, device=device)
             Lwallsh = SBC * ewall * ((Ta + 273.15) ** 4) * viktwall * 0.5
     else:  # nighttime
-        Lwallsun = torch.tensor(0, device=device)
+        Lwallsun = as_tensor(0, device=device)
         Lwallsh = SBC * ewall * ((Ta + 273.15) ** 4) * viktwall * 0.5
 
     if anisotropic_longwave == 1:
@@ -1851,13 +1852,13 @@ def Lside_veg_v2022a(svfS, svfW, svfN, svfE, svfEveg, svfSveg, svfWveg, svfNveg,
         betaB = torch.arctan(torch.tan(svfalfaW * F_sh))
         betasun = ((alfaB - betaB) / 2) + betaB
         if (azimuth > (360 - t)) or (azimuth <= (180 - t)):
-            Lwallsun = SBC * ewall * ((Ta + 273.15 + Tw * torch.sin(aziW * (torch.tensor(np.pi, device=device) / 180))) ** 4) * viktwall * (1 - F_sh) * torch.cos(betasun) * 0.5
+            Lwallsun = SBC * ewall * ((Ta + 273.15 + Tw * torch.sin(aziW * (as_tensor(np.pi, device=device) / 180))) ** 4) * viktwall * (1 - F_sh) * torch.cos(betasun) * 0.5
             Lwallsh = SBC * ewall * ((Ta + 273.15) ** 4) * viktwall * F_sh * 0.5
         else:
-            Lwallsun = torch.tensor(0, device=device)
+            Lwallsun = as_tensor(0, device=device)
             Lwallsh = SBC * ewall * ((Ta + 273.15) ** 4) * viktwall * 0.5
     else:  # nighttime
-        Lwallsun = torch.tensor(0, device=device)
+        Lwallsun = as_tensor(0, device=device)
         Lwallsh = SBC * ewall * ((Ta + 273.15) ** 4) * viktwall * 0.5
 
     if anisotropic_longwave == 1:
@@ -1878,13 +1879,13 @@ def Lside_veg_v2022a(svfS, svfW, svfN, svfE, svfEveg, svfSveg, svfWveg, svfNveg,
         betaB = torch.arctan(torch.tan(svfalfaN * F_sh))
         betasun = ((alfaB - betaB) / 2) + betaB
         if (azimuth > (90 - t)) and (azimuth <= (270 - t)):
-            Lwallsun = SBC * ewall * ((Ta + 273.15 + Tw * torch.sin(aziN * (torch.tensor(np.pi, device=device) / 180))) ** 4) * viktwall * (1 - F_sh) * torch.cos(betasun) * 0.5
+            Lwallsun = SBC * ewall * ((Ta + 273.15 + Tw * torch.sin(aziN * (as_tensor(np.pi, device=device) / 180))) ** 4) * viktwall * (1 - F_sh) * torch.cos(betasun) * 0.5
             Lwallsh = SBC * ewall * ((Ta + 273.15) ** 4) * viktwall * F_sh * 0.5
         else:
-            Lwallsun = torch.tensor(0, device=device)
+            Lwallsun = as_tensor(0, device=device)
             Lwallsh = SBC * ewall * ((Ta + 273.15) ** 4) * viktwall * 0.5
     else:  # nighttime
-        Lwallsun = torch.tensor(0, device=device)
+        Lwallsun = as_tensor(0, device=device)
         Lwallsh = SBC * ewall * ((Ta + 273.15) ** 4) * viktwall * 0.5
 
     if anisotropic_longwave == 1:
@@ -1973,26 +1974,26 @@ def Solweig_2022a_calc(i, dsm, scale, rows, cols, svf, svfN, svfW, svfE, svfS, s
 
     t = 0.
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = get_device()
 
     # Convert input data to torch tensors
-    altitude = torch.tensor(altitude, device=device).clone().detach()
-    azimuth = torch.tensor(azimuth, device=device).clone().detach()
-    zen = torch.tensor(zen, device=device).clone().detach()
-    #lc_grid = torch.tensor(lc_grid, device=device).clone().detach()
-    dectime = torch.tensor(dectime, device=device).clone().detach()
-    altmax = torch.tensor(altmax, device=device).clone().detach()
-    Twater = torch.tensor(Twater, device=device).clone().detach()
-    #TgK_wall = torch.tensor(TgK_wall, device=device).clone().detach()
-    #Tstart_wall = torch.tensor(Tstart_wall, device=device).clone().detach()
-    #TmaxLST = torch.tensor(TmaxLST, device=device).clone().detach()
-    #TmaxLST_wall = torch.tensor(TmaxLST_wall, device=device).clone().detach()
+    altitude = as_tensor(altitude, device=device).clone().detach()
+    azimuth = as_tensor(azimuth, device=device).clone().detach()
+    zen = as_tensor(zen, device=device).clone().detach()
+    #lc_grid = as_tensor(lc_grid, device=device).clone().detach()
+    dectime = as_tensor(dectime, device=device).clone().detach()
+    altmax = as_tensor(altmax, device=device).clone().detach()
+    Twater = as_tensor(Twater, device=device).clone().detach()
+    #TgK_wall = as_tensor(TgK_wall, device=device).clone().detach()
+    #Tstart_wall = as_tensor(Tstart_wall, device=device).clone().detach()
+    #TmaxLST = as_tensor(TmaxLST, device=device).clone().detach()
+    #TmaxLST_wall = as_tensor(TmaxLST_wall, device=device).clone().detach()
 
     # Stefan Bolzmans Constant
-    SBC = torch.tensor(5.67051e-8, device=device).clone().detach()
+    SBC = as_tensor(5.67051e-8, device=device).clone().detach()
 
     # Find sunrise decimal hour - new from 2014a
-    _, _, _, SNUP = daylen(torch.tensor(jday.item()), torch.tensor(location['latitude']))
+    _, _, _, SNUP = daylen(as_tensor(jday.item()), as_tensor(location['latitude']))
 
     # Vapor pressure
     ea = 6.107 * 10 ** ((7.5 * Ta) / (237.3 + Ta)) * (RH / 100.)
@@ -2004,15 +2005,15 @@ def Solweig_2022a_calc(i, dsm, scale, rows, cols, svf, svfN, svfW, svfE, svfS, s
     if altitude > 0: # # # # # # DAYTIME # # # # # #
         # Clearness Index on Earth's surface after Crawford and Dunchon (1999) with a correction
         #  factor for low sun elevations after Lindberg et al.(2008)
-        I0, CI, Kt, I0et, CIuncorr = clearnessindex_2013b(torch.tensor(zen.item()), torch.tensor(jday.item()), torch.tensor(Ta.item()), torch.tensor(RH.item()) / 100., torch.tensor(radG.item()), location, torch.tensor(P.item()))
+        I0, CI, Kt, I0et, CIuncorr = clearnessindex_2013b(as_tensor(zen.item()), as_tensor(jday.item()), as_tensor(Ta.item()), as_tensor(RH.item()) / 100., as_tensor(radG.item()), location, as_tensor(P.item()))
         CI = min(CI, 1.0)
 
         # Estimation of radD and radI if not measured after Reindl et al.(1990)
         if onlyglobal == 1:
-            I0, CI, Kt, I0et, CIuncorr = clearnessindex_2013b(torch.tensor(zen.item()), torch.tensor(jday.item()), Ta.item(), torch.tensor(RH.item()) / 100., torch.tensor(radG.item()), location, torch.tensor(P.item()))
+            I0, CI, Kt, I0et, CIuncorr = clearnessindex_2013b(as_tensor(zen.item()), as_tensor(jday.item()), Ta.item(), as_tensor(RH.item()) / 100., as_tensor(radG.item()), location, as_tensor(P.item()))
             CI = min(CI, 1.0)
 
-            radI, radD = diffusefraction(torch.tensor(radG.item()), torch.tensor(altitude.item()), Kt, torch.tensor(Ta.item()), torch.tensor(RH.item()))
+            radI, radD = diffusefraction(as_tensor(radG.item()), as_tensor(altitude.item()), Kt, as_tensor(Ta.item()), as_tensor(RH.item()))
 
         # Diffuse Radiation
         # Anisotropic Diffuse Radiation after Perez et al. 1993
@@ -2048,7 +2049,7 @@ def Solweig_2022a_calc(i, dsm, scale, rows, cols, svf, svfN, svfW, svfE, svfS, s
         Tg = Tgamp * torch.sin((((dectime - torch.floor(dectime)) - SNUP / 24) / (TmaxLST / 24 - SNUP / 24)) * np.pi / 2) # 2015 a, based on max sun altitude
         Tgwall = Tgampwall * torch.sin((((dectime - torch.floor(dectime)) - SNUP / 24) / (TmaxLST_wall / 24 - SNUP / 24)) * np.pi / 2) # 2015a, based on max sun altitude
 
-        Tgwall = torch.maximum(Tgwall, torch.tensor(0, device=device))
+        Tgwall = torch.maximum(Tgwall, as_tensor(0, device=device))
 
         radI0, _ = diffusefraction(I0, altitude.item(), 1., Ta.item(), RH.item())
         corr = 0.1473 * torch.log(90 - (zen / np.pi * 180)) + 0.3454  # 20070329 correction of lat, Lindberg et al. 2008
@@ -2063,7 +2064,7 @@ def Solweig_2022a_calc(i, dsm, scale, rows, cols, svf, svfN, svfW, svfE, svfS, s
         Tg = Tg * CI_TgG  # new estimation
         Tgwall = Tgwall * CI_TgG
         if landcover == 1:
-            Tg = torch.maximum(Tg, torch.tensor(0, device=device))  # temporary for removing low Tg during morning 20130205
+            Tg = torch.maximum(Tg, as_tensor(0, device=device))  # temporary for removing low Tg during morning 20130205
 
         # # # # Ground View Factors # # # #
         gvfLup, gvfalb, gvfalbnosh, gvfLupE, gvfalbE, gvfalbnoshE, gvfLupS, gvfalbS, gvfalbnoshS, gvfLupW, gvfalbW,\
@@ -2101,7 +2102,7 @@ def Solweig_2022a_calc(i, dsm, scale, rows, cols, svf, svfN, svfW, svfE, svfS, s
 
     else:  # # # # # # # NIGHTTIME # # # # # # # #
 
-        Tgwall = torch.tensor(0, device=device)
+        Tgwall = as_tensor(0, device=device)
 
         # Nocturnal K fluxes set to 0
         Knight = torch.zeros((rows, cols), device=device)
