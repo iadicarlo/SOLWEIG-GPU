@@ -1068,18 +1068,17 @@ def shadowingfunction_wallheight_23(a, vegdem, vegdem2, azimuth, altitude, scale
     Returns:
         tuple: Shadow components including vegetation effects
     """
-    device = get_device()
-
-    degrees = as_tensor(np.pi / 180.0, device=device)
-    azimuth = as_tensor(azimuth, device=device) * degrees
-    altitude = as_tensor(altitude, device=device) * degrees
-
+    device = a.device
+    # Loop bookkeeping in plain Python numbers: device scalars here force a
+    # host/device sync per step, which is very slow on Apple MPS.
+    degrees = math.pi / 180.0
+    azimuth = float(azimuth) * degrees
+    altitude = float(altitude) * degrees
     sizex, sizey = a.shape
-
-    # initialise parameters
-    dx = as_tensor(0.0, device=device)
-    dy = as_tensor(0.0, device=device)
-    dz = as_tensor(0.0, device=device)
+    # A cell can only be shaded by something at most (highest surface - lowest
+    # surface) above it, so the height range is enough to stop the ray.
+    amaxvalue = float(amaxvalue) - float(a.min())
+    dx = dy = dz = 0.0
     temp = torch.zeros((sizex, sizey), device=device)
     tempvegdem = torch.zeros((sizex, sizey), device=device)
     tempvegdem2 = torch.zeros((sizex, sizey), device=device)
@@ -1089,50 +1088,45 @@ def shadowingfunction_wallheight_23(a, vegdem, vegdem2, azimuth, altitude, scale
     sh = torch.zeros((sizex, sizey), device=device)
     vbshvegsh = torch.zeros((sizex, sizey), device=device)
     vegsh = torch.zeros((sizex, sizey), device=device) + bushplant
-    f = a 
-    shvoveg = vegdem 
+    f = a
+    shvoveg = vegdem
     wallbol = (walls > 0).float()
-
-    pibyfour = as_tensor(np.pi / 4.0, device=device)
+    pibyfour = math.pi / 4.0
     threetimespibyfour = 3 * pibyfour
     fivetimespibyfour = 5 * pibyfour
     seventimespibyfour = 7 * pibyfour
-    sinazimuth = torch.sin(azimuth)
-    cosazimuth = torch.cos(azimuth)
-    tanazimuth = torch.tan(azimuth)
-    signsinazimuth = torch.sign(sinazimuth)
-    signcosazimuth = torch.sign(cosazimuth)
-    dssin = torch.abs(1 / sinazimuth)
-    dscos = torch.abs(1 / cosazimuth)
-    tanaltitudebyscale = torch.tan(altitude) / scale
-
+    sinazimuth = math.sin(azimuth)
+    cosazimuth = math.cos(azimuth)
+    tanazimuth = math.tan(azimuth)
+    signsinazimuth = math.copysign(1., sinazimuth) if sinazimuth != 0 else 0.
+    signcosazimuth = math.copysign(1., cosazimuth) if cosazimuth != 0 else 0.
+    dssin = abs(1 / sinazimuth) if sinazimuth != 0 else math.inf
+    dscos = abs(1 / cosazimuth) if cosazimuth != 0 else math.inf
+    tanaltitudebyscale = math.tan(altitude) / scale
     index = 0
-    dzprev = as_tensor(0.0, device=device)
+    dzprev = 0.0
     fabovea = None
     gabovea = None
     lastfabovea = None
     lastgabovea = None
     vegsh2 = None
-
-    while (amaxvalue >= dz) and (torch.abs(dx) < sizex) and (torch.abs(dy) < sizey):
+    while (amaxvalue >= dz) and (abs(dx) < sizex) and (abs(dy) < sizey):
         if ((pibyfour <= azimuth) and (azimuth < threetimespibyfour)) or ((fivetimespibyfour <= azimuth) and (azimuth < seventimespibyfour)):
             dy = signsinazimuth * index
-            dx = -1 * signcosazimuth * torch.abs(torch.round(index / tanazimuth))
+            dx = -1 * signcosazimuth * abs(round(index / tanazimuth))
             ds = dssin
         else:
-            dy = signsinazimuth * torch.abs(torch.round(index * tanazimuth))
+            dy = signsinazimuth * abs(round(index * tanazimuth))
             dx = -1 * signcosazimuth * index
             ds = dscos
-
         dz = (ds * index) * tanaltitudebyscale
         tempvegdem.zero_()
         tempvegdem2.zero_()
         temp.zero_()
         templastfabovea.zero_()
         templastgabovea.zero_()
-
-        absdx = torch.abs(dx)
-        absdy = torch.abs(dy)
+        absdx = abs(dx)
+        absdy = abs(dy)
         xc1 = int((dx + absdx) / 2)
         xc2 = int(sizex + (dx - absdx) / 2)
         yc1 = int((dy + absdy) / 2)
@@ -1141,34 +1135,29 @@ def shadowingfunction_wallheight_23(a, vegdem, vegdem2, azimuth, altitude, scale
         xp2 = int(sizex - (dx + absdx) / 2)
         yp1 = -int((dy - absdy) / 2)
         yp2 = int(sizey - (dy + absdy) / 2)
-
         tempvegdem[xp1:xp2, yp1:yp2] = vegdem[xc1:xc2, yc1:yc2] - dz
         tempvegdem2[xp1:xp2, yp1:yp2] = vegdem2[xc1:xc2, yc1:yc2] - dz
         temp[xp1:xp2, yp1:yp2] = a[xc1:xc2, yc1:yc2] - dz
-
-        f = torch.maximum(f, temp) # Moving building shadow
-        shvoveg = torch.maximum(shvoveg, tempvegdem) # moving vegetation shadow volume
-        sh = torch.where(f > a, as_tensor(1.0, device=device), as_tensor(0.0, device=device))
-        fabovea = (tempvegdem > a).float()   # vegdem above DEM
-        gabovea = (tempvegdem2 > a).float()   # vegdem2 above DEM
-
+        f = torch.maximum(f, temp)  # moving building shadow
+        shvoveg = torch.maximum(shvoveg, tempvegdem)  # moving vegetation shadow volume
+        sh = (f > a).float()
+        fabovea = (tempvegdem > a).float()  # vegdem above DEM
+        gabovea = (tempvegdem2 > a).float()  # vegdem2 above DEM
         templastfabovea[xp1:xp2, yp1:yp2] = vegdem[xc1:xc2, yc1:yc2] - dzprev
         templastgabovea[xp1:xp2, yp1:yp2] = vegdem2[xc1:xc2, yc1:yc2] - dzprev
         lastfabovea = templastfabovea > a
         lastgabovea = templastgabovea > a
         dzprev = dz
         vegsh2 = fabovea + gabovea + lastfabovea.float() + lastgabovea.float()
-        vegsh2 = torch.where(vegsh2 == 4, as_tensor(0.0, device=device), vegsh2)
-        vegsh2 = torch.where(vegsh2 > 0, as_tensor(1.0, device=device), vegsh2)
-
+        vegsh2 = vegsh2.masked_fill(vegsh2 == 4, 0.0)
+        vegsh2 = vegsh2.masked_fill(vegsh2 > 0, 1.0)
         vegsh = torch.maximum(vegsh, vegsh2)
-        vegsh = torch.where(vegsh * sh > 0, as_tensor(0.0, device=device), vegsh)
+        vegsh = vegsh.masked_fill(vegsh * sh > 0, 0.0)
         vbshvegsh = vbshvegsh + vegsh
-
         index += 1
 
-    azilow = azimuth - torch.pi / 2
-    azihigh = azimuth + torch.pi / 2
+    azilow = azimuth - math.pi / 2
+    azihigh = azimuth + math.pi / 2
     if azilow >= 0 and azihigh < 2 * torch.pi:    # 90 to 270  (SHADOW)
         facesh = torch.logical_or(aspect < azilow, aspect >= azihigh).float() - wallbol + 1
     elif azilow < 0 and azihigh <= 2 * torch.pi:    # 0 to 90
