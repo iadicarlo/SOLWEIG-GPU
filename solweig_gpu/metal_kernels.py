@@ -238,17 +238,66 @@ kernel void svf_accumulate(device const float* sh [[buffer(0)]],
 
 // Hourly sky patch loops. Each thread takes one pixel and runs through the
 // patches in order, so every sum gets its terms in the same order as the
-// PyTorch loop. A term like scalar * mask * scalar * mask is mask * P, where
-// P is the product of the scalars computed by PyTorch with the masks set to
-// one: with 0/1 masks this gives the same bits, signed zeros included.
-// The patch matrices are (rows, cols, npatch), so a pixel's patches are
-// contiguous.
+// PyTorch loop. A term like scalar * mask * scalar * mask equals mask * P,
+// where P is the product of the scalars computed by PyTorch with the masks
+// set to one: with 0/1 masks and finite P this gives the same bits. A sum
+// that starts at +0 can never become -0, so terms with a zero mask can be
+// skipped.
+//
+// The three shadow matrices hold only 0 and 1, so they are read as one byte
+// per pixel and patch: bit 0 shmat, bit 1 vegshmat, bit 2 vbshvegshmat.
+// diffsh is a function of shmat and vegshmat and comes from a 4 entry table
+// indexed by bits 0 and 1.
 
 // Sunlit and shaded test of shaded_or_sunlit for one pixel and patch.
 inline void sun_or_shade(float hsvf, float yi, float palt, float r2d, thread float& sp, thread float& shp) {
     const float deg = atan(hsvf + yi) * r2d;
     sp = (deg < palt) ? 1.0f : 0.0f;
     shp = (deg > palt) ? 1.0f : 0.0f;
+}
+
+// Pack the three shadow matrices into codes; flags a value other than 0 or 1.
+// Grid stride loop: n can pass 2^32 on big tiles.
+kernel void pack_patch_codes(device const float* shmat [[buffer(0)]],
+                             device const float* vegmat [[buffer(1)]],
+                             device const float* vbmat [[buffer(2)]],
+                             device uchar* codes [[buffer(3)]],
+                             device atomic_int* bad [[buffer(4)]],
+                             constant long* n [[buffer(5)]],
+                             uint idx [[thread_position_in_grid]],
+                             uint nthreads [[threads_per_grid]])
+{
+    for (long i = idx; i < n[0]; i += nthreads) {
+        const float s = shmat[i], v = vegmat[i], b = vbmat[i];
+        if ((s != 0.0f && s != 1.0f) || (v != 0.0f && v != 1.0f) || (b != 0.0f && b != 1.0f))
+            atomic_store_explicit(bad, 1, memory_order_relaxed);
+        codes[i] = (uchar)((s == 1.0f ? 1 : 0) | (v == 1.0f ? 2 : 0) | (b == 1.0f ? 4 : 0));
+    }
+}
+
+// diffsh as a 4 entry table: any entry fills its slot, then every entry is checked.
+kernel void diffsh_lut_fill(device const float* diffsh [[buffer(0)]],
+                            device const uchar* codes [[buffer(1)]],
+                            device atomic_uint* lut [[buffer(2)]],
+                            constant long* n [[buffer(3)]],
+                            uint idx [[thread_position_in_grid]],
+                            uint nthreads [[threads_per_grid]])
+{
+    for (long i = idx; i < n[0]; i += nthreads)
+        atomic_store_explicit(&lut[codes[i] & 3], as_type<uint>(diffsh[i]), memory_order_relaxed);
+}
+
+kernel void diffsh_lut_check(device const float* diffsh [[buffer(0)]],
+                             device const uchar* codes [[buffer(1)]],
+                             device const uint* lut [[buffer(2)]],
+                             device atomic_int* bad [[buffer(3)]],
+                             constant long* n [[buffer(4)]],
+                             uint idx [[thread_position_in_grid]],
+                             uint nthreads [[threads_per_grid]])
+{
+    for (long i = idx; i < n[0]; i += nthreads)
+        if (as_type<uint>(diffsh[i]) != lut[codes[i] & 3])
+            atomic_store_explicit(bad, 1, memory_order_relaxed);
 }
 
 // First patch loop of define_patch_characteristics.
@@ -259,14 +308,12 @@ inline void sun_or_shade(float hsvf, float yi, float palt, float r2d, thread flo
 // acc planes: 0 Ldown_sky, 1 Lside_sky, 2 Lside_veg, 3 Ldown_veg, 4-7 Least
 // Lsouth Lwest Lnorth, 8 Lside_sun, 9 Lside_sh, 10 Ldown_sun, 11 Ldown_sh,
 // 12 Lside_ref, 13 Ldown_ref.
-kernel void lw_patches(device const float* shmat [[buffer(0)]],
-                       device const float* vegmat [[buffer(1)]],
-                       device const float* vbmat [[buffer(2)]],
-                       device const float* hsvf [[buffer(3)]],
-                       constant float* tab [[buffer(4)]],
-                       constant int* flags [[buffer(5)]],
-                       constant int* params [[buffer(6)]],
-                       device float* acc [[buffer(7)]],
+kernel void lw_patches(device const uchar* codes [[buffer(0)]],
+                       device const float* hsvf [[buffer(1)]],
+                       constant float* tab [[buffer(2)]],
+                       constant int* flags [[buffer(3)]],
+                       constant int* params [[buffer(4)]],
+                       device float* acc [[buffer(5)]],
                        uint idx [[thread_position_in_grid]])
 {
     const int npix = params[0];
@@ -279,42 +326,43 @@ kernel void lw_patches(device const float* shmat [[buffer(0)]],
     for (int i = 0; i < np; ++i) {
         constant float* T = tab + i * 28;
         const int fl = flags[i];
-        const float s = shmat[base + i];
-        const float v = vegmat[base + i];
-        const float b = vbmat[base + i];
-        const float tsky = (s == 1.0f && v == 1.0f) ? 1.0f : 0.0f;
-        const float tveg = (v == 0.0f || b == 0.0f) ? 1.0f : 0.0f;
-        const float tsh = ((1.0f - s) * b == 1.0f) ? 1.0f : 0.0f;
-        a[0] = a[0] + tsky * T[0];
-        a[1] = a[1] + tsky * T[1];
-        a[2] = a[2] + tveg * T[2];
-        a[3] = a[3] + tveg * T[3];
-        for (int d = 0; d < 4; ++d) {
-            if (fl & (1 << d)) {
-                a[4 + d] = a[4 + d] + tsky * T[4 + d];
-                a[4 + d] = a[4 + d] + tveg * T[8 + d];
-            }
+        const int c = codes[base + i];
+        const bool s = c & 1, v = c & 2, b = c & 4;
+        if (s && v) {                       // temp_sky
+            a[0] = a[0] + T[0];
+            a[1] = a[1] + T[1];
+            for (int d = 0; d < 4; ++d)
+                if (fl & (1 << d)) a[4 + d] = a[4 + d] + T[4 + d];
         }
-        if (fl & 16) {
-            float sp, shp;
-            sun_or_shade(h, T[24], T[25], T[26], sp, shp);
-            const float msun = sp * tsh;
-            const float msh = shp * tsh;
-            a[8] = a[8] + msun * T[12];
-            a[9] = a[9] + msh * T[13];
-            a[10] = a[10] + msun * T[14];
-            a[11] = a[11] + msh * T[15];
-            for (int d = 0; d < 4; ++d) {
-                if (fl & (1 << d)) {
-                    a[4 + d] = a[4 + d] + msun * T[16 + d];
-                    a[4 + d] = a[4 + d] + msh * T[20 + d];
+        if (!v || !b) {                     // temp_vegsh
+            a[2] = a[2] + T[2];
+            a[3] = a[3] + T[3];
+            for (int d = 0; d < 4; ++d)
+                if (fl & (1 << d)) a[4 + d] = a[4 + d] + T[8 + d];
+        }
+        if (!s && b) {                      // temp_sh
+            if (fl & 16) {
+                float sp, shp;
+                sun_or_shade(h, T[24], T[25], T[26], sp, shp);
+                if (sp != 0.0f) {
+                    a[8] = a[8] + T[12];
+                    a[10] = a[10] + T[14];
                 }
-            }
-        } else {
-            a[9] = a[9] + tsh * T[13];
-            a[11] = a[11] + tsh * T[15];
-            for (int d = 0; d < 4; ++d) {
-                if (fl & (1 << d)) a[4 + d] = a[4 + d] + tsh * T[20 + d];
+                if (shp != 0.0f) {
+                    a[9] = a[9] + T[13];
+                    a[11] = a[11] + T[15];
+                }
+                for (int d = 0; d < 4; ++d) {
+                    if (fl & (1 << d)) {
+                        if (sp != 0.0f) a[4 + d] = a[4 + d] + T[16 + d];
+                        if (shp != 0.0f) a[4 + d] = a[4 + d] + T[20 + d];
+                    }
+                }
+            } else {
+                a[9] = a[9] + T[13];
+                a[11] = a[11] + T[15];
+                for (int d = 0; d < 4; ++d)
+                    if (fl & (1 << d)) a[4 + d] = a[4 + d] + T[20 + d];
             }
         }
     }
@@ -323,14 +371,12 @@ kernel void lw_patches(device const float* shmat [[buffer(0)]],
 
 // Second patch loop of define_patch_characteristics (reflected longwave).
 // tab (npatch x 8): steradian, cos(alt), sin(alt), cos to E S W N.
-kernel void lw_reflected(device const float* shmat [[buffer(0)]],
-                         device const float* vegmat [[buffer(1)]],
-                         device const float* vbmat [[buffer(2)]],
-                         device const float* refl [[buffer(3)]],
-                         constant float* tab [[buffer(4)]],
-                         constant int* flags [[buffer(5)]],
-                         constant int* params [[buffer(6)]],
-                         device float* acc [[buffer(7)]],
+kernel void lw_reflected(device const uchar* codes [[buffer(0)]],
+                         device const float* refl [[buffer(1)]],
+                         constant float* tab [[buffer(2)]],
+                         constant int* flags [[buffer(3)]],
+                         constant int* params [[buffer(4)]],
+                         device float* acc [[buffer(5)]],
                          uint idx [[thread_position_in_grid]])
 {
     const int npix = params[0];
@@ -343,26 +389,23 @@ kernel void lw_reflected(device const float* shmat [[buffer(0)]],
     const float r = refl[idx];
     const ulong base = (ulong)idx * (ulong)np;
     for (int i = 0; i < np; ++i) {
+        // no skipping here: the reflected flux is per pixel and may be NaN
+        const float m = ((codes[base + i] & 7) != 7) ? 1.0f : 0.0f;
         constant float* T = tab + i * 8;
         const int fl = flags[i];
-        const float s = shmat[base + i];
-        const float v = vegmat[base + i];
-        const float b = vbmat[base + i];
-        const float m = (s == 0.0f || v == 0.0f || b == 0.0f) ? 1.0f : 0.0f;
         const float rs = r * T[0];
         const float rsc = (rs * T[1]) * m;
         side = side + rsc;
         down = down + (rs * T[2]) * m;
-        for (int d = 0; d < 4; ++d) {
+        for (int d = 0; d < 4; ++d)
             if (fl & (1 << d)) dirs[d] = dirs[d] + rsc * T[3 + d];
-        }
     }
     for (int d = 0; d < 4; ++d) acc[(4 + d) * npix + idx] = dirs[d];
     acc[12 * npix + idx] = side;
     acc[13 * npix + idx] = down;
 }
 
-// Anisotropic patch loop of Kside_veg_v2022a, cylinder (mode 1) or box (mode 0).
+// Anisotropic patch loop of Kside_veg_v2022a, cylinder (params[2] = 1) or box.
 // tab (npatch x 32): 0 lumChi, 1 steradian, 2 anglIncC, 3-6 anglInc E S W N,
 // 7 veg, 8 sun, 9 shade, 10 shade (no sun branch), 11-14 veg E S W N,
 // 15-18 sun E S W N, 19-22 shade E S W N, 23-26 shade E S W N (no sun branch),
@@ -370,78 +413,80 @@ kernel void lw_reflected(device const float* shmat [[buffer(0)]],
 // flags: bits 0-3 diffuse directions, bits 4-7 reflected directions, bit 8 sun branch.
 // acc planes: 0 KsideD, 1 Kref_veg, 2 Kref_sun, 3 Kref_sh, 4-7 diffRad E S W N,
 // 8-11 Kref_veg, 12-15 Kref_sun, 16-19 Kref_sh (E S W N).
-kernel void kside_patches(device const float* diffsh [[buffer(0)]],
-                          device const float* shmat [[buffer(1)]],
-                          device const float* vegmat [[buffer(2)]],
-                          device const float* vbmat [[buffer(3)]],
-                          device const float* hsvf [[buffer(4)]],
-                          constant float* tab [[buffer(5)]],
-                          constant int* flags [[buffer(6)]],
-                          constant int* params [[buffer(7)]],
-                          device float* acc [[buffer(8)]],
+kernel void kside_patches(device const uchar* codes [[buffer(0)]],
+                          constant float* lut [[buffer(1)]],
+                          device const float* hsvf [[buffer(2)]],
+                          constant float* tab [[buffer(3)]],
+                          constant int* flags [[buffer(4)]],
+                          constant int* params [[buffer(5)]],
+                          device float* acc [[buffer(6)]],
                           uint idx [[thread_position_in_grid]])
 {
     const int npix = params[0];
     const int np = params[1];
     const int cyl = params[2];
     if ((int)idx >= npix) return;
-    float a[20];
-    for (int j = 0; j < 20; ++j) a[j] = acc[j * npix + idx];
     const float h = hsvf[idx];
     const ulong base = (ulong)idx * (ulong)np;
+    if (cyl) {
+        float sd = acc[idx], veg = acc[npix + idx], sun = acc[2 * npix + idx], sh = acc[3 * npix + idx];
+        for (int i = 0; i < np; ++i) {
+            constant float* T = tab + i * 32;
+            const int c = codes[base + i];
+            sd = sd + ((lut[c & 3] * T[0]) * T[2]) * T[1];
+            if (!(c & 2) || !(c & 4)) veg = veg + T[7];
+            if (!(c & 1) && (c & 4)) {
+                float sp, shp;
+                sun_or_shade(h, T[27], T[28], T[29], sp, shp);
+                if (sp != 0.0f) sun = sun + T[8];
+                if (shp != 0.0f) sh = sh + T[9];
+            }
+        }
+        acc[idx] = sd; acc[npix + idx] = veg; acc[2 * npix + idx] = sun; acc[3 * npix + idx] = sh;
+        return;
+    }
+    float a[20];
+    for (int j = 0; j < 20; ++j) a[j] = acc[j * npix + idx];
     for (int i = 0; i < np; ++i) {
         constant float* T = tab + i * 32;
         const int fl = flags[i];
-        const float D = diffsh[base + i];
-        const float s = shmat[base + i];
-        const float v = vegmat[base + i];
-        const float b = vbmat[base + i];
-        const float tveg = (v == 0.0f || b == 0.0f) ? 1.0f : 0.0f;
-        const float tsh = ((1.0f - s) * b == 1.0f) ? 1.0f : 0.0f;
-        if (cyl) {
-            a[0] = a[0] + ((D * T[0]) * T[2]) * T[1];
-            a[1] = a[1] + tveg * T[7];
-            float sp, shp;
-            sun_or_shade(h, T[27], T[28], T[29], sp, shp);
-            a[2] = a[2] + (sp * tsh) * T[8];
-            a[3] = a[3] + (shp * tsh) * T[9];
-        } else {
-            for (int d = 0; d < 4; ++d) {
-                if (fl & (1 << d)) a[4 + d] = a[4 + d] + ((D * T[0]) * T[3 + d]) * T[1];
-            }
-            a[1] = a[1] + tveg * T[7];
-            for (int d = 0; d < 4; ++d) {
-                if (fl & (16 << d)) a[8 + d] = a[8 + d] + tveg * T[11 + d];
-            }
+        const int c = codes[base + i];
+        const float D = lut[c & 3];
+        for (int d = 0; d < 4; ++d)
+            if (fl & (1 << d)) a[4 + d] = a[4 + d] + ((D * T[0]) * T[3 + d]) * T[1];
+        if (!(c & 2) || !(c & 4)) {
+            a[1] = a[1] + T[7];
+            for (int d = 0; d < 4; ++d)
+                if (fl & (16 << d)) a[8 + d] = a[8 + d] + T[11 + d];
+        }
+        if (!(c & 1) && (c & 4)) {
             if (fl & 256) {
                 float sp, shp;
                 sun_or_shade(h, T[27], T[28], T[29], sp, shp);
-                const float msun = sp * tsh;
-                const float msh = shp * tsh;
-                a[2] = a[2] + msun * T[8];
-                a[3] = a[3] + msh * T[9];
+                if (sp != 0.0f) a[2] = a[2] + T[8];
+                if (shp != 0.0f) a[3] = a[3] + T[9];
                 for (int d = 0; d < 4; ++d) {
                     if (fl & (16 << d)) {
-                        a[12 + d] = a[12 + d] + msun * T[15 + d];
-                        a[16 + d] = a[16 + d] + msh * T[19 + d];
+                        if (sp != 0.0f) a[12 + d] = a[12 + d] + T[15 + d];
+                        if (shp != 0.0f) a[16 + d] = a[16 + d] + T[19 + d];
                     }
                 }
             } else {
-                a[3] = a[3] + tsh * T[10];
-                for (int d = 0; d < 4; ++d) {
-                    if (fl & (16 << d)) a[16 + d] = a[16 + d] + tsh * T[23 + d];
-                }
+                a[3] = a[3] + T[10];
+                for (int d = 0; d < 4; ++d)
+                    if (fl & (16 << d)) a[16 + d] = a[16 + d] + T[23 + d];
             }
         }
     }
     for (int j = 0; j < 20; ++j) acc[j * npix + idx] = a[j];
 }
 
-// out += sum over patches of mat[..., i] * w[i], in patch order (aniLum).
-kernel void patch_weighted_sum(device const float* mat [[buffer(0)]],
-                               constant float* w [[buffer(1)]],
-                               constant int* params [[buffer(2)]],
-                               device float* out [[buffer(3)]],
+// out += sum over patches of diffsh * w[i], in patch order (aniLum).
+kernel void patch_weighted_sum(device const uchar* codes [[buffer(0)]],
+                               constant float* lut [[buffer(1)]],
+                               constant float* w [[buffer(2)]],
+                               constant int* params [[buffer(3)]],
+                               device float* out [[buffer(4)]],
                                uint idx [[thread_position_in_grid]])
 {
     const int npix = params[0];
@@ -449,8 +494,71 @@ kernel void patch_weighted_sum(device const float* mat [[buffer(0)]],
     if ((int)idx >= npix) return;
     float a = out[idx];
     const ulong base = (ulong)idx * (ulong)np;
-    for (int i = 0; i < np; ++i) a = a + mat[base + i] * w[i];
+    for (int i = 0; i < np; ++i) a = a + lut[codes[base + i] & 3] * w[i];
     out[idx] = a;
+}
+
+// Tail of sunonsurface_2018a plus the sums of gvf_2018a, for one azimuth.
+// w: the 16 planes of sunonsurface_sweep. keep, lupg (the ground Lup term),
+// buildings, alb, shadow: per pixel. sc: first + 1, first, second + 1, second.
+// acc planes: gvfLup, gvfalb, gvfalbnosh, gvfSum, gvfLup E S W N,
+// gvfalb E S W N, gvfalbnosh E S W N. params: npix, direction bits.
+kernel void gvf_tail(device const float* w [[buffer(0)]],
+                     device const float* keep [[buffer(1)]],
+                     device const float* lupg [[buffer(2)]],
+                     device const float* buildings [[buffer(3)]],
+                     device const float* alb [[buffer(4)]],
+                     device const float* shadow [[buffer(5)]],
+                     constant float* sc [[buffer(6)]],
+                     constant int* params [[buffer(7)]],
+                     device float* acc [[buffer(8)]],
+                     uint idx [[thread_position_in_grid]])
+{
+    const int npix = params[0];
+    const int dirs = params[1];
+    if ((int)idx >= npix) return;
+    const float F1 = sc[0], F = sc[1], S1 = sc[2], S = sc[3];
+    float W[16];
+    for (int j = 0; j < 16; ++j) W[j] = w[j * npix + idx];
+    // W: 0 sh, 1 Lupsh, 2 albsh, 3 albnosh, 4 Lwall, 5 albwall, 6 wall, 7 albwallnosh, 8-15 the same at "first"
+    const float m1 = (W[14] > 0.0f) ? 1.0f : 0.0f, n1 = (W[14] > 0.0f) ? 0.0f : 1.0f;
+    const float m2 = (W[6] > 0.0f) ? 1.0f : 0.0f, n2 = (W[6] > 0.0f) ? 0.0f : 1.0f;
+    const float i1 = (W[15] > 0.0f) ? 1.0f : 0.0f, j1 = (W[15] > 0.0f) ? 0.0f : 1.0f;
+    const float i2 = (W[7] > 0.0f) ? 1.0f : 0.0f, j2 = (W[7] > 0.0f) ? 0.0f : 1.0f;
+    const bool k = keep[idx] == 1.0f;
+    const float wall2 = k ? 0.0f : W[6];
+    const float lwall2 = k ? 0.0f : W[4];
+    const float albwall2 = k ? 0.0f : W[5];
+
+    float gvf2 = ((wall2 + W[0]) / S1) * m2 + (W[0] / S) * n2;
+    if (gvf2 > 1.0f) gvf2 = 1.0f;
+    const float gvfLup1 = ((W[12] + W[9]) / F1) * m1 + (W[9] / F) * n1;
+    const float gvfLup2 = ((lwall2 + W[1]) / S1) * m2 + (W[1] / S) * n2;
+    const float gvfalb1 = ((W[13] + W[10]) / F1) * m1 + (W[10] / F) * n1;
+    const float gvfalb2 = ((albwall2 + W[2]) / S1) * m2 + (W[2] / S) * n2;
+    const float gvfalbnosh1 = ((W[15] + W[11]) / F1) * i1 + (W[11] / F) * j1;
+    const float gvfalbnosh2 = ((W[7] + W[3]) / S) * i2 + (W[3] / S) * j2;
+
+    const float b = buildings[idx];
+    const float bm = b * -1.0f + 1.0f;
+    float gvfLup = (gvfLup1 * 0.5f + gvfLup2 * 0.4f) / 0.9f;
+    gvfLup = gvfLup + lupg[idx] * bm;
+    float gvfalb = (gvfalb1 * 0.5f + gvfalb2 * 0.4f) / 0.9f;
+    gvfalb = gvfalb + (alb[idx] * bm) * shadow[idx];
+    float gvfalbnosh = (gvfalbnosh1 * 0.5f + gvfalbnosh2 * 0.4f) / 0.9f;
+    gvfalbnosh = gvfalbnosh * b + alb[idx] * bm;
+
+    acc[idx] = acc[idx] + gvfLup;
+    acc[npix + idx] = acc[npix + idx] + gvfalb;
+    acc[2 * npix + idx] = acc[2 * npix + idx] + gvfalbnosh;
+    acc[3 * npix + idx] = acc[3 * npix + idx] + gvf2;
+    for (int d = 0; d < 4; ++d) {
+        if (dirs & (1 << d)) {
+            acc[(4 + d) * npix + idx] = acc[(4 + d) * npix + idx] + gvfLup;
+            acc[(8 + d) * npix + idx] = acc[(8 + d) * npix + idx] + gvfalb;
+            acc[(12 + d) * npix + idx] = acc[(12 + d) * npix + idx] + gvfalbnosh;
+        }
+    }
 }
 
 """
@@ -647,44 +755,96 @@ def _tables(device, tab, flags):
     return tab, flags
 
 
-def patch_matrices_ok(*mats):
-    """The hourly kernels read (rows, cols, npatch) float32 matrices directly."""
-    return metal_enabled(*mats) and all(m.dim() == 3 and m.is_contiguous() for m in mats)
+def patch_codes(shmat, vegshmat, vbshvegshmat):
+    """One byte per pixel and patch holding the three 0/1 shadow matrices.
+
+    Built once and kept on shmat. Returns None when the matrices are not
+    (rows, cols, npatch) float32 on MPS or hold values other than 0 and 1.
+    """
+    mats = (shmat, vegshmat, vbshvegshmat)
+    if not (metal_enabled(*mats) and all(m.dim() == 3 and m.is_contiguous() and m.shape == shmat.shape
+                                         for m in mats)):
+        return None
+    key = tuple(id(m) for m in mats)
+    cached = getattr(shmat, "_solweig_patch_codes", None)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    codes = torch.empty(shmat.shape, dtype=torch.uint8, device=shmat.device)
+    bad = torch.zeros(1, dtype=torch.int32, device=shmat.device)
+    n = shmat.numel()
+    n_t = torch.tensor([n], dtype=torch.int64, device=shmat.device)
+    _library().pack_patch_codes(shmat, vegshmat, vbshvegshmat, codes, bad, n_t, threads=min(n, 1 << 24))
+    if int(bad.item()) != 0:
+        codes = None
+    shmat._solweig_patch_codes = (key, codes)
+    return codes
 
 
-def lw_patches(shmat, vegmat, vbmat, hsvf, tab, flags, acc):
+def diffsh_table(diffsh, codes):
+    """The 4 values of diffsh indexed by codes & 3, checked against every entry.
+
+    Kept on diffsh. Returns None if diffsh is not a function of shmat and vegshmat.
+    """
+    if codes is None or not metal_enabled(diffsh) or diffsh.shape != codes.shape:
+        return None
+    cached = getattr(diffsh, "_solweig_lut", None)
+    if cached is not None and cached[0] is codes:
+        return cached[1]
+    if not diffsh.is_contiguous():
+        return None
+    n = diffsh.numel()
+    n_t = torch.tensor([n], dtype=torch.int64, device=diffsh.device)
+    bits = torch.zeros(4, dtype=torch.int32, device=diffsh.device)
+    bad = torch.zeros(1, dtype=torch.int32, device=diffsh.device)
+    _library().diffsh_lut_fill(diffsh, codes, bits, n_t, threads=min(n, 1 << 24))
+    _library().diffsh_lut_check(diffsh, codes, bits, bad, n_t, threads=min(n, 1 << 24))
+    lut = bits.view(torch.float32) if int(bad.item()) == 0 else None
+    diffsh._solweig_lut = (codes, lut)
+    return lut
+
+
+def _check_finite(tab):
+    # skipping masked terms is only exact when every factor is finite
+    return bool(torch.isfinite(tab).all())
+
+
+def lw_patches(codes, hsvf, tab, flags, acc):
     """First patch loop of define_patch_characteristics; adds into acc (14, rows, cols)."""
-    rows, cols, npatch = shmat.shape
-    tab, flags = _tables(shmat.device, tab, flags)
-    params = torch.tensor([rows * cols, npatch], dtype=torch.int32, device=shmat.device)
-    _library().lw_patches(shmat, vegmat, vbmat, hsvf.contiguous(), tab, flags, params, acc,
-                          threads=rows * cols)
+    rows, cols, npatch = codes.shape
+    tab, flags = _tables(codes.device, tab, flags)
+    params = torch.tensor([rows * cols, npatch], dtype=torch.int32, device=codes.device)
+    _library().lw_patches(codes, hsvf.contiguous(), tab, flags, params, acc, threads=rows * cols)
 
 
-def lw_reflected(shmat, vegmat, vbmat, refl, tab, flags, acc):
+def lw_reflected(codes, refl, tab, flags, acc):
     """Reflected longwave loop of define_patch_characteristics; adds into acc."""
-    rows, cols, npatch = shmat.shape
-    tab, flags = _tables(shmat.device, tab, flags)
-    params = torch.tensor([rows * cols, npatch], dtype=torch.int32, device=shmat.device)
-    _library().lw_reflected(shmat, vegmat, vbmat, refl.contiguous(), tab, flags, params, acc,
-                            threads=rows * cols)
+    rows, cols, npatch = codes.shape
+    tab, flags = _tables(codes.device, tab, flags)
+    params = torch.tensor([rows * cols, npatch], dtype=torch.int32, device=codes.device)
+    _library().lw_reflected(codes, refl.contiguous(), tab, flags, params, acc, threads=rows * cols)
 
 
-def kside_patches(diffsh, shmat, vegmat, vbmat, hsvf, tab, flags, cyl, acc):
+def kside_patches(codes, lut, hsvf, tab, flags, cyl, acc):
     """Anisotropic patch loop of Kside_veg_v2022a; adds into acc (20, rows, cols)."""
-    rows, cols, npatch = shmat.shape
-    tab, flags = _tables(shmat.device, tab, flags)
-    params = torch.tensor([rows * cols, npatch, 1 if cyl else 0], dtype=torch.int32, device=shmat.device)
-    _library().kside_patches(diffsh, shmat, vegmat, vbmat, hsvf.contiguous(), tab, flags, params, acc,
-                             threads=rows * cols)
+    rows, cols, npatch = codes.shape
+    tab, flags = _tables(codes.device, tab, flags)
+    params = torch.tensor([rows * cols, npatch, 1 if cyl else 0], dtype=torch.int32, device=codes.device)
+    _library().kside_patches(codes, lut, hsvf.contiguous(), tab, flags, params, acc, threads=rows * cols)
 
 
-def patch_weighted_sum(mat, weights, out):
-    """out += sum_i mat[:, :, i] * weights[i], added in patch order."""
-    rows, cols, npatch = mat.shape
-    if isinstance(weights, torch.Tensor):
-        w = weights.to(device=mat.device, dtype=torch.float32).contiguous()
-    else:
-        w = torch.as_tensor(np.ascontiguousarray(weights, dtype=np.float32)).to(mat.device)
-    params = torch.tensor([rows * cols, npatch], dtype=torch.int32, device=mat.device)
-    _library().patch_weighted_sum(mat, w, params, out, threads=rows * cols)
+def patch_weighted_sum(codes, lut, weights, out):
+    """out += sum_i diffsh[:, :, i] * weights[i], added in patch order."""
+    rows, cols, npatch = codes.shape
+    w = weights.to(device=codes.device, dtype=torch.float32).contiguous()
+    params = torch.tensor([rows * cols, npatch], dtype=torch.int32, device=codes.device)
+    _library().patch_weighted_sum(codes, lut, w, params, out, threads=rows * cols)
+
+
+def gvf_tail(w, keep, lupg, buildings, alb, shadow, first, second, dirs, acc):
+    """Tail of sunonsurface_2018a for one azimuth, added into the 16 gvf_2018a sums."""
+    _, rows, cols = w.shape
+    shape = (rows, cols)
+    planes = [torch.broadcast_to(t, shape).to(torch.float32).contiguous() for t in (keep, lupg, buildings, alb, shadow)]
+    sc = torch.tensor([first + 1, first, second + 1, second], dtype=torch.float32, device=w.device)
+    params = torch.tensor([rows * cols, dirs], dtype=torch.int32, device=w.device)
+    _library().gvf_tail(w, *planes, sc, params, acc, threads=rows * cols)

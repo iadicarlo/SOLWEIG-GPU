@@ -76,7 +76,7 @@ def daylen(DOY, XLAT):
     return DAYL, DEC, SNDN, SNUP
 
 def sunonsurface_2018a(azimuthA, scale, buildings, shadow, sunwall, first, second, aspect, walls, Tg, Tgwall, Ta,
-                       emis_grid, ewall, alb_grid, SBC, albedo_b, Twater, lc_grid, landcover):
+                       emis_grid, ewall, alb_grid, SBC, albedo_b, Twater, lc_grid, landcover, gvf_acc=None, gvf_dirs=0):
     """
     Calculate solar radiation on surfaces with different orientations.
     
@@ -138,26 +138,10 @@ def sunonsurface_2018a(azimuthA, scale, buildings, shadow, sunwall, first, secon
     albshadow = alb_grid * shadow
     alb = alb_grid
 
-    tempsh = torch.zeros((sizex, sizey), device=device)
-    tempbu = torch.zeros((sizex, sizey), device=device)
-    tempbub = torch.zeros((sizex, sizey), device=device)
-    tempbubwall = torch.zeros((sizex, sizey), device=device)
-    tempwallsun = torch.zeros((sizex, sizey), device=device)
-    weightsumsh = torch.zeros((sizex, sizey), device=device)
-    weightsumwall = torch.zeros((sizex, sizey), device=device)
     first = float(round(float(first) * float(scale)))
     if first < 1:
         first = 1
     second = int(round(float(second) * float(scale)))
-    weightsumLupsh = torch.zeros((sizex, sizey), device=device)
-    weightsumLwall = torch.zeros((sizex, sizey), device=device)
-    weightsumalbsh = torch.zeros((sizex, sizey), device=device)
-    weightsumalbwall = torch.zeros((sizex, sizey), device=device)
-    weightsumalbnosh = torch.zeros((sizex, sizey), device=device)
-    weightsumalbwallnosh = torch.zeros((sizex, sizey), device=device)
-    tempLupsh = torch.zeros((sizex, sizey), device=device)
-    tempalbsh = torch.zeros((sizex, sizey), device=device)
-    tempalbnosh = torch.zeros((sizex, sizey), device=device)
 
     pibyfour = torch.pi / 4
     threetimespibyfour = 3 * pibyfour
@@ -169,7 +153,8 @@ def sunonsurface_2018a(azimuthA, scale, buildings, shadow, sunwall, first, secon
     signsinazimuth = math.copysign(1., sinazimuth) if sinazimuth != 0 else 0.
     signcosazimuth = math.copysign(1., cosazimuth) if cosazimuth != 0 else 0.
 
-    if second >= 1 and metal_enabled(buildings, shadow, Lup, albshadow, alb, sunwall, Lwall, albedo_b):
+    swept = second >= 1 and metal_enabled(buildings, shadow, Lup, albshadow, alb, sunwall, Lwall, albedo_b)
+    if swept:
         w = sunonsurface_sweep(azimuthA, second, min(second, int(first)) - 1, buildings, shadow, Lup,
                                albshadow, alb, sunwall, Lwall, albedo_b)
         (weightsumsh, weightsumLupsh, weightsumalbsh, weightsumalbnosh, weightsumLwall, weightsumalbwall,
@@ -179,6 +164,22 @@ def sunonsurface_2018a(azimuthA, scale, buildings, shadow, sunwall, first, secon
         wallsuninfluence_first = weightsumwall_first > 0
         wallinfluence_first = weightsumalbwallnosh_first > 0
     else:
+        tempsh = torch.zeros((sizex, sizey), device=device)
+        tempbu = torch.zeros((sizex, sizey), device=device)
+        tempbub = torch.zeros((sizex, sizey), device=device)
+        tempbubwall = torch.zeros((sizex, sizey), device=device)
+        tempwallsun = torch.zeros((sizex, sizey), device=device)
+        weightsumsh = torch.zeros((sizex, sizey), device=device)
+        weightsumwall = torch.zeros((sizex, sizey), device=device)
+        weightsumLupsh = torch.zeros((sizex, sizey), device=device)
+        weightsumLwall = torch.zeros((sizex, sizey), device=device)
+        weightsumalbsh = torch.zeros((sizex, sizey), device=device)
+        weightsumalbwall = torch.zeros((sizex, sizey), device=device)
+        weightsumalbnosh = torch.zeros((sizex, sizey), device=device)
+        weightsumalbwallnosh = torch.zeros((sizex, sizey), device=device)
+        tempLupsh = torch.zeros((sizex, sizey), device=device)
+        tempalbsh = torch.zeros((sizex, sizey), device=device)
+        tempalbnosh = torch.zeros((sizex, sizey), device=device)
         for n in range(second):
             if (pibyfour <= azimuth and azimuth < threetimespibyfour) or (fivetimespibyfour <= azimuth and azimuth < seventimespibyfour):
                 dy = signsinazimuth * index
@@ -262,6 +263,13 @@ def sunonsurface_2018a(azimuthA, scale, buildings, shadow, sunwall, first, secon
     keep = (weightsumwall == second).float() - facesh
     keep[keep == -1] = 0
 
+    # gvf_2018a hands in its 16 sums (gvf_acc) and the azimuth's direction
+    # bits; on MPS one kernel then does the rest of this function and the sums.
+    if gvf_acc is not None and swept and torch.is_tensor(alb_grid) and alb_grid.numel() in (1, buildings.numel()):
+        lupg = ((SBC * emis_grid * (Tg * shadow + Ta + 273.15) ** 4) - SBC * emis_grid * (Ta + 273.15) ** 4)
+        mk.gvf_tail(w, keep, lupg, buildings, alb_grid, shadow, first, second, gvf_dirs, gvf_acc)
+        return None
+
     gvf1 = ((weightsumwall_first + weightsumsh_first) / (first + 1)) * wallsuninfluence_first + \
            (weightsumsh_first) / first * (wallsuninfluence_first * -1 + 1)
     weightsumwall[keep == 1] = 0
@@ -296,11 +304,26 @@ def sunonsurface_2018a(azimuthA, scale, buildings, shadow, sunwall, first, secon
     gvfalbnosh = (gvfalbnosh1 * 0.5 + gvfalbnosh2 * 0.4) / 0.9
     gvfalbnosh = gvfalbnosh * buildings + alb_grid * (buildings * -1 + 1)
 
-    del tempbu, tempsh, tempLupsh, tempalbsh, tempalbnosh, tempwallsun, tempbub, tempbubwall
 
     del weightsumLupsh ,weightsumLwall ,weightsumalbsh ,weightsumalbwall ,weightsumalbnosh ,weightsumalbwallnosh,weightsumsh ,weightsumwall
 
+    if gvf_acc is not None:
+        _add_gvf_sums(gvf_acc, gvf_dirs, gvfLup, gvfalb, gvfalbnosh, gvf2)
+        return None
     return gvf, gvfLup, gvfalb, gvfalbnosh, gvf2
+
+
+def _add_gvf_sums(acc, dirs, gvfLupi, gvfalbi, gvfalbnoshi, gvf2):
+    """The per azimuth sums of gvf_2018a, on the planes of acc."""
+    acc[0] += gvfLupi
+    acc[1] += gvfalbi
+    acc[2] += gvfalbnoshi
+    acc[3] += gvf2
+    for d in range(4):
+        if dirs & (1 << d):
+            acc[4 + d] += gvfLupi
+            acc[8 + d] += gvfalbi
+            acc[12 + d] += gvfalbnoshi
 
 
 def gvf_2018a(wallsun, walls, buildings, scale, shadow, first, second, dirwalls, Tg, Tgwall, Ta, emis_grid, ewall,
@@ -356,7 +379,23 @@ def gvf_2018a(wallsun, walls, buildings, scale, shadow, first, second, dirwalls,
 
     sunwall = ((wallsun / walls * buildings) == 1).float()
 
-    for j in torch.arange(0, len(azimuthA), device=device):
+    if metal_enabled(buildings, shadow, walls):
+        # The sums below, done per azimuth inside sunonsurface_2018a (same order).
+        acc = torch.zeros((16, rows, cols), device=device)
+        for j, a in enumerate(azimuthA.tolist()):
+            dirs = ((1 if 0 <= a < 180 else 0) | (2 if 90 <= a < 270 else 0) | (4 if 180 <= a < 360 else 0)
+                    | (8 if (270 <= a or a < 90) else 0))
+            sunonsurface_2018a(
+                azimuthA[j], scale, buildings, shadow, sunwall, first, second,
+                dirwalls * torch.pi / 180, walls, Tg, Tgwall, Ta, emis_grid, ewall, alb_grid, SBC, albedo_b, Twater,
+                lc_grid, landcover, gvf_acc=acc, gvf_dirs=dirs)
+        (gvfLup, gvfalb, gvfalbnosh, gvfSum, gvfLupE, gvfLupS, gvfLupW, gvfLupN, gvfalbE, gvfalbS, gvfalbW, gvfalbN,
+         gvfalbnoshE, gvfalbnoshS, gvfalbnoshW, gvfalbnoshN) = acc.unbind(0)
+        azimuth_loop = []
+    else:
+        azimuth_loop = torch.arange(0, len(azimuthA), device=device)
+
+    for j in azimuth_loop:
         _, gvfLupi, gvfalbi, gvfalbnoshi, gvf2 = sunonsurface_2018a(
             azimuthA[j], scale, buildings, shadow, sunwall, first, second, dirwalls * torch.pi / 180, walls, Tg, Tgwall,
             Ta, emis_grid, ewall, alb_grid, SBC, albedo_b, Twater, lc_grid, landcover
@@ -581,14 +620,14 @@ def shaded_or_sunlit(solar_altitude, solar_azimuth, patch_altitude, patch_azimut
     return sunlit_patches, shaded_patches
 
 def _kside_patches_metal(radI, radD, albedo, azimuth, altitude, t, cyl, patch_altitude, patch_azimuth,
-                         steradian, lumChi, deg2rad, asvf, diffsh, shmat, vegshmat, vbshvegshmat, rows, cols):
+                         steradian, lumChi, deg2rad, asvf, codes, lut, rows, cols):
     """Metal version of the anisotropic patch loop in Kside_veg_v2022a.
 
     Returns the 20 sums as planes of one tensor, or None when a factor is not
     a scalar. Per patch factors are the loop's PyTorch expressions with the
     masks set to one.
     """
-    device = shmat.device
+    device = codes.device
     sunlit_surface = ((albedo * (radI * torch.cos(altitude * deg2rad)) + (radD * 0.5)) / torch.pi)
     shaded_surface = ((albedo * radD * 0.5) / torch.pi)
     if any(torch.as_tensor(x).numel() != 1 for x in (sunlit_surface, shaded_surface)):
@@ -619,8 +658,10 @@ def _kside_patches_metal(radI, radD, albedo, azimuth, altitude, t, cyl, patch_al
             (azd > 90) & (azd < 270)]
     flags = sum(b.reshape(-1).to(torch.int32) << k for k, b in enumerate(bits)).cpu().numpy()
 
+    if not mk._check_finite(tab):
+        return None
     acc = torch.zeros((20, rows, cols), device=device)
-    mk.kside_patches(diffsh, shmat, vegshmat, vbshvegshmat, torch.tan(asvf), tab, flags, cyl == 1, acc)
+    mk.kside_patches(codes, lut, torch.tan(asvf), tab, flags, cyl == 1, acc)
     return acc
 
 
@@ -758,10 +799,11 @@ def Kside_veg_v2022a(radI, radD, radG, shadow, svfS, svfW, svfN, svfE, svfEveg, 
         # On MPS one kernel runs the patch loop below with identical sums.
         npatch_loop = patch_azimuth.shape[0]
         kacc = None
-        if mk.patch_matrices_ok(diffsh, shmat, vegshmat, vbshvegshmat):
+        codes = mk.patch_codes(shmat, vegshmat, vbshvegshmat)
+        lut = mk.diffsh_table(diffsh, codes)
+        if lut is not None and asvf.shape == (rows, cols):
             kacc = _kside_patches_metal(radI, radD, albedo, azimuth, altitude, t, cyl, patch_altitude, patch_azimuth,
-                                        steradian, lumChi, deg2rad, asvf, diffsh, shmat, vegshmat, vbshvegshmat,
-                                        rows, cols)
+                                        steradian, lumChi, deg2rad, asvf, codes, lut, rows, cols)
         if kacc is not None:
             npatch_loop = 0
             (KsideD, Kref_veg, Kref_sun, Kref_sh, diffRadE, diffRadS, diffRadW, diffRadN,
@@ -1500,7 +1542,7 @@ def model3(sky_patches, esky, Ta):
 
 
 def _patch_characteristics_metal(solar_altitude, solar_azimuth, patch_altitude, patch_azimuth, asvf,
-                                 shmat, vegshmat, vbshvegshmat, Lsky_down, Lsky_side, Lup, Ta, Tgwall,
+                                 codes, Lsky_down, Lsky_side, Lup, Ta, Tgwall,
                                  ewall, SBC, paz, ster, cos_alt, sin_alt, sun_azimuth, sun_up, rows, cols):
     """Metal version of the two patch loops in define_patch_characteristics.
 
@@ -1508,7 +1550,7 @@ def _patch_characteristics_metal(solar_altitude, solar_azimuth, patch_altitude, 
     mask set to one, so the kernel only multiplies them by the 0/1 masks and
     adds them in patch order. Returns None when a factor is not a scalar.
     """
-    device = shmat.device
+    device = codes.device
     rad = math.pi / 180
     vegetation_surface = ((ewall * SBC * ((Ta + 273.15) ** 4)) / math.pi)
     sunlit_surface = ((ewall * SBC * ((Ta + Tgwall + 273.15) ** 4)) / math.pi)
@@ -1546,15 +1588,17 @@ def _patch_characteristics_metal(solar_altitude, solar_azimuth, patch_altitude, 
     tab = torch.stack([torch.broadcast_to(c.reshape(-1).to(torch.float32), (n,)) for c in cols_], dim=1)
     assert tab.shape == (n, 28)
 
+    if not mk._check_finite(tab):
+        return None
     acc = torch.zeros((14, rows, cols), device=device)
     hsvf = torch.tan(asvf)
-    mk.lw_patches(shmat, vegshmat, vbshvegshmat, hsvf, tab, flags, acc)
+    mk.lw_patches(codes, hsvf, tab, flags, acc)
 
     Ldown_sky = acc[0]
     reflected_on_surfaces = (((Ldown_sky + Lup) * (1 - ewall) * 0.5) / math.pi)
     tab2 = torch.stack([ster_t, cos_t, sin_t] + cosd + [zero], dim=1)
     flags2 = [f & 15 for f in flags]
-    mk.lw_reflected(shmat, vegshmat, vbshvegshmat, reflected_on_surfaces, tab2, flags2, acc)
+    mk.lw_reflected(codes, reflected_on_surfaces, tab2, flags2, acc)
 
     (Ldown_sky, Lside_sky, Lside_veg, Ldown_veg, Least, Lsouth, Lwest, Lnorth,
      Lside_sun, Lside_sh, Ldown_sun, Ldown_sh, Lside_ref, Ldown_ref) = acc.unbind(0)
@@ -1640,9 +1684,10 @@ def define_patch_characteristics(solar_altitude, solar_azimuth,
     sun_azimuth = float(solar_azimuth)
     sun_up = float(solar_altitude) > 0
 
-    if mk.patch_matrices_ok(shmat, vegshmat, vbshvegshmat) and Lup.shape == (rows, cols):
+    codes = mk.patch_codes(shmat, vegshmat, vbshvegshmat)
+    if codes is not None and Lup.shape == (rows, cols) and asvf.shape == (rows, cols):
         out = _patch_characteristics_metal(solar_altitude, solar_azimuth, patch_altitude, patch_azimuth, asvf,
-                                           shmat, vegshmat, vbshvegshmat, Lsky_down, Lsky_side, Lup, Ta, Tgwall,
+                                           codes, Lsky_down, Lsky_side, Lup, Ta, Tgwall,
                                            ewall, SBC, paz, ster, cos_alt, sin_alt, sun_azimuth, sun_up, rows, cols)
         if out is not None:
             return out
@@ -2187,8 +2232,10 @@ def Solweig_2022a_calc(i, dsm, scale, rows, cols, svf, svfN, svfW, svfE, svfS, s
             lv, pc_, pb_ = Perez_v3(zenDeg.item(), azimuth.item(), radD, radI, jday.item(), patchchoice, patch_option)
             # Total relative luminance from sky, i.e. from each patch, into each cell
             aniLum = torch.zeros((rows, cols), device=device)
-            if mk.patch_matrices_ok(diffsh) and lv.shape[0] == diffsh.shape[2]:
-                mk.patch_weighted_sum(diffsh, lv[:, 2], aniLum)
+            codes = mk.patch_codes(shmat, vegshmat, vbshvegshmat)
+            lut = mk.diffsh_table(diffsh, codes)
+            if lut is not None and lv.shape[0] == diffsh.shape[2]:
+                mk.patch_weighted_sum(codes, lut, lv[:, 2], aniLum)
             else:
                 for idx in range(lv.shape[0]):
                     aniLum += diffsh[:,:,idx] * lv[idx,2]
