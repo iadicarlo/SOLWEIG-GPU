@@ -18,6 +18,14 @@ def test_auto_device_prefers_gpu(monkeypatch):
     assert dev.get_device().type == expected
 
 
+def test_empty_cache_calls_cuda_on_cuda_machines(monkeypatch):
+    calls = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: calls.append("cuda"))
+    dev.empty_cache()
+    assert calls == ["cuda"]
+
+
 def test_as_tensor_keeps_float64_on_cpu():
     t = dev.as_tensor(np.zeros(3, dtype=np.float64), device="cpu")
     assert t.dtype == torch.float64
