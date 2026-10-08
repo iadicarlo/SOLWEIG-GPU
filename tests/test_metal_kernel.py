@@ -96,3 +96,13 @@ def test_metal_gvf_matches_pytorch(monkeypatch, scale, landcover):
     ref, new = _both(monkeypatch, run)
     for r, n in zip(ref, new):
         np.testing.assert_array_equal(n, r)
+
+
+@mps
+def test_metal_svf_matches_pytorch(monkeypatch):
+    from solweig_gpu.shadow import svf_calculator
+
+    amax, (a, veg, veg2, bush) = _scene(n=64, seed=4)
+    ref, new = _both(monkeypatch, lambda: svf_calculator(2, torch.tensor(amax), a, veg, veg2, bush, 1.0))
+    for r, n in zip(ref, new):
+        np.testing.assert_array_equal(n, r)

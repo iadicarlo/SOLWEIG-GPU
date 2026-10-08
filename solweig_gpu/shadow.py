@@ -23,7 +23,7 @@ import calendar
 import scipy.ndimage.interpolation as sc
 import torch
 from .device import get_device, empty_cache, as_tensor
-from .metal_kernels import metal_enabled, shadow_metal
+from .metal_kernels import metal_enabled, shadow_metal, pack_heights, svf_accumulate
 import torch.nn.functional as F
 from scipy.ndimage import rotate
 import time
@@ -530,11 +530,30 @@ def svf_calculator(patch_option, amaxvalue=None, a=None, vegdem=None, vegdem2=No
 
     aziintervalaniso = torch.ceil(aziinterval / 2.0)
 
+    # On MPS one kernel adds each patch to all 15 sums (same float32 operations
+    # in the same order) instead of about 300 separate array operations.
+    use_metal = metal_enabled(a, vegdem, vegdem2, bush)
+    weight = None
+    if use_metal:
+        acc = torch.stack([svf, svfE, svfS, svfW, svfN, svfveg, svfEveg, svfSveg, svfWveg, svfNveg,
+                           svfaveg, svfEaveg, svfSaveg, svfWaveg, svfNaveg])
+        packed = pack_heights(a, vegdem, vegdem2)
+
     index = 0
     for i in range(skyvaultaltint.shape[0]):
+        if use_metal:
+            weights = np.array([[float(annulus_weight(k, aziinterval[i], device)),
+                                 float(annulus_weight(k, aziintervalaniso[i], device))]
+                                for k in range(annulino[i]+1, annulino[i+1]+1)], dtype=np.float32).reshape(-1, 2)
         for j in range(aziinterval[i].int()):
             altitude = skyvaultaltint[i]
             azimuth = iazimuth[0, index]
+            if use_metal:
+                sh, vegsh, vbshvegsh = shadow_metal(amaxvalue, a, vegdem, vegdem2, bush, azimuth, altitude, scale,
+                                                    packed=packed)
+                svf_accumulate(acc, shmat, vegshmat, vbshvegshmat, sh, vegsh, vbshvegsh, weights, azimuth, index)
+                index += 1
+                continue
             sh, vegsh, vbshvegsh = shadow(amaxvalue, a, vegdem, vegdem2, bush, azimuth, altitude, scale)
 
             vegshmat[:, :, index] = vegsh
@@ -572,6 +591,9 @@ def svf_calculator(patch_option, amaxvalue=None, a=None, vegdem=None, vegdem2=No
                     svfNaveg = svfNaveg + weight * vbshvegsh
 
             index += 1
+    if use_metal:
+        (svf, svfE, svfS, svfW, svfN, svfveg, svfEveg, svfSveg, svfWveg, svfNveg,
+         svfaveg, svfEaveg, svfSaveg, svfWaveg, svfNaveg) = acc.unbind(0)
     svfS = svfS + 3.0459e-004
     svfW = svfW + 3.0459e-004
     svf[svf > 1.] = 1.

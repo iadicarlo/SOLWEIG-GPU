@@ -184,6 +184,56 @@ kernel void sunonsurface_sweep(device const float4* g [[buffer(0)]],
     out[7 * npix + idx] = walbwallnosh;
     for (int k = 0; k < 8; ++k) out[(8 + k) * npix + idx] = snapv[k];
 }
+// One sky patch of svf_calculator: the same float32 sums, in the same order,
+// as its loop over the annulus rings k. acc holds 15 planes:
+// svf, svfE, svfS, svfW, svfN, svfveg, svfEveg, svfSveg, svfWveg, svfNveg,
+// svfaveg, svfEaveg, svfSaveg, svfWaveg, svfNaveg.
+// params: npix, nk, direction bits (E=1, S=2, W=4, N=8), patch index, npatch
+kernel void svf_accumulate(device const float* sh [[buffer(0)]],
+                           device const float* vegsh [[buffer(1)]],
+                           device const float* vbsh [[buffer(2)]],
+                           device float* acc [[buffer(3)]],
+                           device float* shmat [[buffer(4)]],
+                           device float* vegshmat [[buffer(5)]],
+                           device float* vbshmat [[buffer(6)]],
+                           constant float2* w [[buffer(7)]],
+                           constant int* params [[buffer(8)]],
+                           uint idx [[thread_position_in_grid]])
+{
+    const int npix = params[0];
+    const int nk = params[1];
+    const int dirs = params[2];
+    const int patch = params[3];
+    const int npatch = params[4];
+    if ((int)idx >= npix) return;
+    const float s = sh[idx];
+    const float v = vegsh[idx];
+    const float b = vbsh[idx];
+    float a[15];
+    for (int j = 0; j < 15; ++j) a[j] = acc[j * npix + idx];
+    for (int k = 0; k < nk; ++k) {
+        const float wf = w[k].x;   // annulus weight for the full ring
+        const float wa = w[k].y;   // and for the half ring
+        a[0] = a[0] + wf * s;
+        const float ws = wa * s;
+        if (dirs & 1) a[1] = a[1] + ws;
+        if (dirs & 2) a[2] = a[2] + ws;
+        if (dirs & 4) a[3] = a[3] + ws;
+        if (dirs & 8) a[4] = a[4] + ws;
+        a[5] = a[5] + wf * v;
+        a[10] = a[10] + wf * b;
+        for (int d = 0; d < 4; ++d) {
+            if (dirs & (1 << d)) {
+                a[6 + d] = a[6 + d] + wa * v;
+                a[11 + d] = a[11 + d] + wa * b;
+            }
+        }
+    }
+    for (int j = 0; j < 15; ++j) acc[j * npix + idx] = a[j];
+    shmat[idx * npatch + patch] = s;
+    vegshmat[idx * npatch + patch] = v;
+    vbshmat[idx * npatch + patch] = b;
+}
 """
 
 _LIB = None
@@ -349,3 +399,21 @@ def sunonsurface_sweep(azimuth, nsteps, snap, buildings, shadow, Lup, albshadow,
     out = torch.empty((16, sizex, sizey), device=device, dtype=torch.float32)
     lib.sunonsurface_sweep(g, g2, lwall, dxy_t, params, float(albedo_b), out, threads=sizex * sizey)
     return out
+
+
+def svf_accumulate(acc, shmat, vegshmat, vbshvegshmat, sh, vegsh, vbshvegsh, weights, azimuth, index):
+    """Add one sky patch to the 15 SVF sums and store its shadows in the patch matrices.
+
+    ``weights`` is a float32 array (nk, 2) with the annulus weights for the
+    full and the half ring, as annulus_weight() returns them on this device.
+    """
+    lib = _library()
+    rows, cols = sh.shape
+    azimuth = float(azimuth)
+    dirs = ((1 if 0 <= azimuth < 180 else 0) | (2 if 90 <= azimuth < 270 else 0)
+            | (4 if 180 <= azimuth < 360 else 0) | (8 if (azimuth >= 270 or azimuth < 90) else 0))
+    params = torch.tensor([rows * cols, weights.shape[0], dirs, index, shmat.shape[2]],
+                          dtype=torch.int32, device=sh.device)
+    w = torch.from_numpy(np.ascontiguousarray(weights, dtype=np.float32)).to(sh.device)
+    lib.svf_accumulate(sh, vegsh, vbshvegsh, acc, shmat, vegshmat, vbshvegshmat, w, params,
+                       threads=rows * cols)
